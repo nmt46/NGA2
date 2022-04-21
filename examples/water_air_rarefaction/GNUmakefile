@@ -23,16 +23,15 @@ INCLUDE_LOCATIONS += $(Ulocs)
 VPATH_LOCATIONS   += $(Ulocs)
 
 # Define external libraries - this can also be in .profile
-#HDF5_DIR = /Users/desjardi/Builds/hdf5
-LAPACK_DIR= /Users/desjardi/Builds/lapack
 HYPRE_DIR = /Users/desjardi/Builds/hypre
+LAPACK_DIR= /Users/desjardi/Builds/lapack
 IRL_DIR   = /Users/desjardi/Builds/IRL
 
 # NGA compilation definitions
 include $(NGA_HOME)/tools/GNUMake/Make.defs
 
 # Include NGA base code
-Bdirs   := particles core data solver config grid libraries
+Bdirs   := core two_phase data solver config grid libraries
 Bpack   += $(foreach dir, $(Bdirs), $(NGA_HOME)/src/$(dir)/Make.package)
 include $(Bpack)
 
