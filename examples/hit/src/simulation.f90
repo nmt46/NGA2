@@ -3,6 +3,7 @@ module simulation
    use precision,         only: WP
    use geometry,          only: cfg
    use pfft3d_class,      only: pfft3d
+   use hypre_str_class,   only: hypre_str
    use incomp_class,      only: incomp
    use timetracker_class, only: timetracker
    use ensight_class,     only: ensight
@@ -11,8 +12,9 @@ module simulation
    implicit none
    private
    
-   !> Single-phase incompressible flow solver, a pressure solver, and a time tracker
-   type(pfft3d),      public :: pressure_solver
+   !> Single-phase incompressible flow solver, pressure and implicit solvers, and a time tracker
+   !type(pfft3d),      public :: ps
+   type(hypre_str),   public :: ps
    type(incomp),      public :: fs
    type(timetracker), public :: time
    
@@ -29,8 +31,10 @@ module simulation
    real(WP), dimension(:,:,:), allocatable :: resU,resV,resW
    real(WP), dimension(:,:,:), allocatable :: Ui,Vi,Wi
    
-   !> Fluid viscosity
+   !> Fluid and forcing parameters
    real(WP) :: visc
+   real(WP) :: Urms0
+   real(WP) :: tau_eddy
    
 contains
    
@@ -64,6 +68,7 @@ contains
       
       ! Create a single-phase flow solver without bconds
       create_and_initialize_flow_solver: block
+         use hypre_str_class, only: pcg_pfmg
          ! Create flow solver
          fs=incomp(cfg=cfg,name='NS solver')
          ! Assign constant viscosity
@@ -71,15 +76,51 @@ contains
          ! Assign constant density
          call param_read('Density',fs%rho)
          ! Prepare and configure pressure solver
-         pressure_solver=pfft3d(cfg=cfg,name='Pressure')
+         !ps=pfft3d(cfg=cfg,name='Pressure')
+         ps=hypre_str(cfg=cfg,name='Pressure',method=pcg_pfmg,nst=7)
+         ps%maxlevel=10
+         call param_read('Pressure iteration',ps%maxit)
+         call param_read('Pressure tolerance',ps%rcvg)
          ! Setup the solver
-         call fs%setup(pressure_solver=pressure_solver)
-         ! Zero initial field
-         fs%U=0.0_WP; fs%V=0.0_WP; fs%W=0.0_WP
+         call fs%setup(pressure_solver=ps)
+      end block create_and_initialize_flow_solver
+
+
+      ! Prepare initial velocity field
+      initialize_velocity: block
+         use random, only: random_normal
+         integer :: i,j,k
+         ! Read in velocity rms and forcing time scale
+         call param_read('Initial rms',Urms0)
+         call param_read('Eddy turnover time',tau_eddy)
+         ! Gaussian initial field
+         do k=fs%cfg%kmin_,fs%cfg%kmax_
+            do j=fs%cfg%jmin_,fs%cfg%jmax_
+               do i=fs%cfg%imin_,fs%cfg%imax_
+                  fs%U(i,j,k)=random_normal(m=0.0_WP,sd=Urms0)
+                  fs%V(i,j,k)=random_normal(m=0.0_WP,sd=Urms0)
+                  fs%W(i,j,k)=random_normal(m=0.0_WP,sd=Urms0)
+               end do
+            end do
+         end do
+         call fs%cfg%sync(fs%U)
+         call fs%cfg%sync(fs%V)
+         call fs%cfg%sync(fs%W)
+         ! Project to ensure divergence-free
+         call fs%get_div()
+         fs%psolv%rhs=-fs%cfg%vol*fs%div*fs%rho/time%dt
+         fs%psolv%sol=0.0_WP
+         call fs%psolv%solve()
+         call fs%shift_p(fs%psolv%sol)
+         call fs%get_pgrad(fs%psolv%sol,resU,resV,resW)
+         fs%P=fs%P+fs%psolv%sol
+         fs%U=fs%U-time%dt*resU/fs%rho
+         fs%V=fs%V-time%dt*resV/fs%rho
+         fs%W=fs%W-time%dt*resW/fs%rho
          ! Calculate cell-centered velocities and divergence
          call fs%interp_vel(Ui,Vi,Wi)
          call fs%get_div()
-      end block create_and_initialize_flow_solver
+      end block initialize_velocity
       
       
       ! Add Ensight output
@@ -91,6 +132,7 @@ contains
          call param_read('Ensight output period',ens_evt%tper)
          ! Add variables to output
          call ens_out%add_vector('velocity',Ui,Vi,Wi)
+         call ens_out%add_scalar('pressure',fs%P)
          ! Output to ensight
          if (ens_evt%occurs()) call ens_out%write_data(time%t)
       end block create_ensight
@@ -168,13 +210,21 @@ contains
             resV=-2.0_WP*(fs%rho*fs%V-fs%rho*fs%Vold)+time%dt*resV
             resW=-2.0_WP*(fs%rho*fs%W-fs%rho*fs%Wold)+time%dt*resW
             
-            ! Form implicit residuals
-            !call fs%solve_implicit(time%dt,resU,resV,resW)
-            
+            ! Add linear forcing term
+            linear_forcing: block
+               real(WP) :: meanU,meanV,meanW
+               call fs%cfg%integrate(A=fs%U,integral=meanU); meanU=meanU/fs%cfg%vol_total
+               call fs%cfg%integrate(A=fs%V,integral=meanV); meanV=meanV/fs%cfg%vol_total
+               call fs%cfg%integrate(A=fs%W,integral=meanW); meanW=meanW/fs%cfg%vol_total
+               resU=resU+time%dt*(fs%U-meanU)/(2.0_WP*tau_eddy)
+               resV=resV+time%dt*(fs%V-meanV)/(2.0_WP*tau_eddy)
+               resW=resW+time%dt*(fs%W-meanW)/(2.0_WP*tau_eddy)
+            end block linear_forcing
+
             ! Apply these residuals
-            fs%U=2.0_WP*fs%U-fs%Uold+resU
-            fs%V=2.0_WP*fs%V-fs%Vold+resV
-            fs%W=2.0_WP*fs%W-fs%Wold+resW
+            fs%U=2.0_WP*fs%U-fs%Uold+resU/fs%rho
+            fs%V=2.0_WP*fs%V-fs%Vold+resV/fs%rho
+            fs%W=2.0_WP*fs%W-fs%Wold+resW/fs%rho
             
             ! Apply other boundary conditions on the resulting fields
             call fs%apply_bcond(time%t,time%dt)
