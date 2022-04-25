@@ -5,8 +5,10 @@ module simulation
    use pfft3d_class,      only: pfft3d
    use hypre_str_class,   only: hypre_str
    use incomp_class,      only: incomp
+   use lpt_class,         only: lpt
    use timetracker_class, only: timetracker
    use ensight_class,     only: ensight
+   use partmesh_class,    only: partmesh
    use event_class,       only: event
    use monitor_class,     only: monitor
    implicit none
@@ -17,13 +19,15 @@ module simulation
    type(hypre_str),   public :: ps
    type(incomp),      public :: fs
    type(timetracker), public :: time
+   type(lpt),         public :: lp
    
    !> Ensight postprocessing
-   type(ensight) :: ens_out
-   type(event)   :: ens_evt
+   type(partmesh) :: pmesh
+   type(ensight)  :: ens_out
+   type(event)    :: ens_evt
    
    !> Simulation monitor file
-   type(monitor) :: mfile,cflfile
+   type(monitor) :: mfile,cflfile,lptfile
    
    public :: simulation_init,simulation_run,simulation_final
    
@@ -33,7 +37,7 @@ module simulation
    
    !> Fluid and forcing parameters
    real(WP) :: visc
-   real(WP) :: Urms0
+   real(WP) :: Urms0,KE0,KE
    real(WP) :: tau_eddy
    
 contains
@@ -88,8 +92,11 @@ contains
 
       ! Prepare initial velocity field
       initialize_velocity: block
-         use random, only: random_normal
-         integer :: i,j,k
+         use random,   only: random_normal
+         use mpi_f08,  only: MPI_ALLREDUCE,MPI_SUM
+         use parallel, only: MPI_REAL_WP
+         integer :: i,j,k,ierr
+         real(WP) :: myKE
          ! Read in velocity rms and forcing time scale
          call param_read('Initial rms',Urms0)
          call param_read('Eddy turnover time',tau_eddy)
@@ -120,8 +127,66 @@ contains
          ! Calculate cell-centered velocities and divergence
          call fs%interp_vel(Ui,Vi,Wi)
          call fs%get_div()
+         ! Calculate KE0
+         myKE=0.0_WP
+         do k=fs%cfg%kmin_,fs%cfg%kmax_
+            do j=fs%cfg%jmin_,fs%cfg%jmax_
+               do i=fs%cfg%imin_,fs%cfg%imax_
+                  myKE=myKE+0.5_WP*(Ui(i,j,k)**2+Vi(i,j,k)**2+Wi(i,j,k)**2)
+               end do
+            end do
+         end do
+         call MPI_ALLREDUCE(myKE,KE,1,MPI_REAL_WP,MPI_SUM,fs%cfg%comm,ierr)
+         KE0=KE
       end block initialize_velocity
       
+      
+      ! Initialize LPT solver
+      initialize_lpt: block
+         use random, only: random_uniform
+         real(WP) :: dp
+         integer :: i,np
+         ! Create solver
+         lp=lpt(cfg=cfg,name='LPT')
+         ! Get particle density from the input
+         call param_read('Particle density',lp%rho)
+         ! Get particle diameter from the input
+         call param_read('Particle diameter',dp)
+         ! Get number of particles
+         call param_read('Number of particles',np)
+         ! Root process initializes np particles randomly
+         if (lp%cfg%amRoot) then
+            call lp%resize(np)
+            do i=1,np
+               ! Give id
+               lp%p(i)%id=int(i,8)
+               ! Set the diameter
+               lp%p(i)%d=dp
+               ! Assign random position in the domain
+               lp%p(i)%pos=[random_uniform(lp%cfg%x(lp%cfg%imin),lp%cfg%x(lp%cfg%imax+1)),&
+               &            random_uniform(lp%cfg%y(lp%cfg%jmin),lp%cfg%y(lp%cfg%jmax+1)),&
+               &            random_uniform(lp%cfg%z(lp%cfg%kmin),lp%cfg%z(lp%cfg%kmax+1))]
+               ! Give zero velocity
+               lp%p(i)%vel=0.0_WP
+               ! Give zero dt
+               lp%p(i)%dt=0.0_WP
+               ! Locate the particle on the mesh
+               lp%p(i)%ind=lp%cfg%get_ijk_global(lp%p(i)%pos,[lp%cfg%imin,lp%cfg%jmin,lp%cfg%kmin])
+               ! Activate the particle
+               lp%p(i)%flag=0
+            end do
+         end if
+         ! Distribute particles
+         call lp%sync()
+      end block initialize_lpt
+      
+
+      ! Create partmesh object for Lagrangian particle output
+      create_pmesh: block
+         pmesh=partmesh(nvar=0,name='lpt')
+         call lp%update_partmesh(pmesh)
+      end block create_pmesh
+
       
       ! Add Ensight output
       create_ensight: block
@@ -133,6 +198,7 @@ contains
          ! Add variables to output
          call ens_out%add_vector('velocity',Ui,Vi,Wi)
          call ens_out%add_scalar('pressure',fs%P)
+         call ens_out%add_particle('particles',pmesh)
          ! Output to ensight
          if (ens_evt%occurs()) call ens_out%write_data(time%t)
       end block create_ensight
@@ -153,6 +219,7 @@ contains
          call mfile%add_column(fs%Vmax,'Vmax')
          call mfile%add_column(fs%Wmax,'Wmax')
          call mfile%add_column(fs%Pmax,'Pmax')
+         call mfile%add_column(KE,'Kinetic energy')
          call mfile%add_column(fs%divmax,'Maximum divergence')
          call mfile%add_column(fs%psolv%it,'Pressure iteration')
          call mfile%add_column(fs%psolv%rerr,'Pressure error')
@@ -168,6 +235,21 @@ contains
          call cflfile%add_column(fs%CFLv_y,'Viscous yCFL')
          call cflfile%add_column(fs%CFLv_z,'Viscous zCFL')
          call cflfile%write()
+         ! Create LPT monitor
+         call lp%get_max()
+         lptfile=monitor(amroot=lp%cfg%amRoot,name='lpt')
+         call lptfile%add_column(time%n,'Timestep number')
+         call lptfile%add_column(time%t,'Time')
+         call lptfile%add_column(lp%np,'Particle number')
+         call lptfile%add_column(lp%Umin,'Particle Umin')
+         call lptfile%add_column(lp%Umax,'Particle Umax')
+         call lptfile%add_column(lp%Vmin,'Particle Vmin')
+         call lptfile%add_column(lp%Vmax,'Particle Vmax')
+         call lptfile%add_column(lp%Wmin,'Particle Wmin')
+         call lptfile%add_column(lp%Wmax,'Particle Wmax')
+         call lptfile%add_column(lp%dmin,'Particle dmin')
+         call lptfile%add_column(lp%dmax,'Particle dmax')
+         call lptfile%write()
       end block create_monitor
       
       
@@ -185,6 +267,10 @@ contains
          call fs%get_cfl(time%dt,time%cfl)
          call time%adjust_dt()
          call time%increment()
+         
+         ! Advance particles by dt
+         resU=fs%rho; resV=fs%visc
+         call lp%advance(dt=time%dt,U=fs%U,V=fs%V,W=fs%W,rho=resU,visc=resV)
          
          ! Remember old velocity
          fs%Uold=fs%U
@@ -212,13 +298,29 @@ contains
             
             ! Add linear forcing term
             linear_forcing: block
-               real(WP) :: meanU,meanV,meanW
+               use mpi_f08,  only: MPI_ALLREDUCE,MPI_SUM
+               use parallel, only: MPI_REAL_WP
+               real(WP) :: meanU,meanV,meanW,myKE
+               integer :: i,j,k,ierr
+               ! Calculate KE
+               call fs%interp_vel(Ui,Vi,Wi)
+               myKE=0.0_WP
+               do k=fs%cfg%kmin_,fs%cfg%kmax_
+                  do j=fs%cfg%jmin_,fs%cfg%jmax_
+                     do i=fs%cfg%imin_,fs%cfg%imax_
+                        myKE=myKE+0.5_WP*(Ui(i,j,k)**2+Vi(i,j,k)**2+Wi(i,j,k)**2)
+                     end do
+                  end do
+               end do
+               call MPI_ALLREDUCE(myKE,KE,1,MPI_REAL_WP,MPI_SUM,fs%cfg%comm,ierr)
+               ! Calculate mean velocity
                call fs%cfg%integrate(A=fs%U,integral=meanU); meanU=meanU/fs%cfg%vol_total
                call fs%cfg%integrate(A=fs%V,integral=meanV); meanV=meanV/fs%cfg%vol_total
                call fs%cfg%integrate(A=fs%W,integral=meanW); meanW=meanW/fs%cfg%vol_total
-               resU=resU+time%dt*(fs%U-meanU)/(2.0_WP*tau_eddy)
-               resV=resV+time%dt*(fs%V-meanV)/(2.0_WP*tau_eddy)
-               resW=resW+time%dt*(fs%W-meanW)/(2.0_WP*tau_eddy)
+               ! Add forcing term
+               resU=resU+time%dt*KE0/KE*(fs%U-meanU)/(2.0_WP*tau_eddy)
+               resV=resV+time%dt*KE0/KE*(fs%V-meanV)/(2.0_WP*tau_eddy)
+               resW=resW+time%dt*KE0/KE*(fs%W-meanW)/(2.0_WP*tau_eddy)
             end block linear_forcing
 
             ! Apply these residuals
@@ -254,12 +356,17 @@ contains
          call fs%get_div()
          
          ! Output to ensight
-         if (ens_evt%occurs()) call ens_out%write_data(time%t)
+         if (ens_evt%occurs()) then
+            call lp%update_partmesh(pmesh)
+            call ens_out%write_data(time%t)
+         end if
          
          ! Perform and output monitoring
          call fs%get_max()
          call mfile%write()
          call cflfile%write()
+         call lp%get_max()
+         call lptfile%write()
          
       end do
       
