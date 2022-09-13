@@ -1,29 +1,23 @@
 # Parallelization
-Partition : 1 2 2
+Partition : 1 1 1
 
 # Mesh definition
-Lx :  10
-Ly :  5
-Lz :  5
-nx :  80
-ny :  40
-nz :  40
+Lx :  1
+Ly :  1
+Lz :  1
+nx :  20
+ny :  20
+nz :  20
 
 # Case definition
-Gas velocity :   1
-Droplet radii :  0.5 0.5 0.5
-Droplet center : 1 0 0
+Droplet diameter :  0.01
+Droplet center : 0 0 0
 
 # Fluid properties
-Liquid dynamic viscosity :    1e-1
+Drop dynamic viscosity :    1e-1
 Gas dynamic viscosity :       1e-3
-Liquid density :              1000
+Drop density :              1000
 Gas density :                 1
-Surface tension coefficient : 0.05
-! 0.10 << vibrational
-! 0.07 << bag
-! 0.01 << multi-mode
-! when do we get sheet-thinning?
 
 # Time integration
 Max timestep size : 0.025
