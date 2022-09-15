@@ -31,7 +31,7 @@ LAPACK_DIR= /usr/local/Cellar/lapack
 include $(NGA_HOME)/tools/GNUMake/Make.defs
 
 # Include NGA base code
-Bdirs   := particles core subgrid two_phase data solver config grid libraries
+Bdirs   := particles core variable_density subgrid data solver config grid libraries 
 Bpack   += $(foreach dir, $(Bdirs), $(NGA_HOME)/src/$(dir)/Make.package)
 include $(Bpack)
 

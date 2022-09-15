@@ -23,8 +23,9 @@ VPATH_LOCATIONS   += $(Ulocs)
 
 # Define external libraries - this can also be in .profile
 #HDF5_DIR = /Users/desjardi/Builds/hdf5
-LAPACK_DIR= /Users/desjardi/Builds/lapack
-HYPRE_DIR = /Users/desjardi/Builds/hypre
+HYPRE_DIR = /Users/natethompson/Builds/hypre
+# IRL_DIR   = /Users/natethompson/Builds/IRL
+LAPACK_DIR= /usr/local/Cellar/lapack
 
 # NGA compilation definitions
 include $(NGA_HOME)/tools/GNUMake/Make.defs

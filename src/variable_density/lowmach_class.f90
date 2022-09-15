@@ -64,6 +64,8 @@ module lowmach_class
       real(WP), dimension(:,:,:), allocatable :: V        !< V velocity array
       real(WP), dimension(:,:,:), allocatable :: W        !< W velocity array
       real(WP), dimension(:,:,:), allocatable :: P        !< Pressure array
+      real(WP), dimension(:,:,:), allocatable :: T        !< Temperature array
+      real(WP), dimension(:,:,:), allocatable :: Y_f      !< Fuel mass fraction array
       
       ! Old flow variables
       real(WP), dimension(:,:,:), allocatable :: rhoold   !< Old density array
@@ -173,6 +175,8 @@ contains
       allocate(self%V   (self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%V=0.0_WP
       allocate(self%W   (self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%W=0.0_WP
       allocate(self%P   (self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%P=0.0_WP
+      allocate(self%T   (self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%T=0.0_WP
+      allocate(self%Y_f (self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%Y_f=0.0_WP
       
       ! Allocate old flow variables
       allocate(self%rhoold (self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%rhoold =0.0_WP

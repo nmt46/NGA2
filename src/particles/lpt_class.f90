@@ -30,6 +30,7 @@ module lpt_class
       real(WP), dimension(3) :: pos        !< Particle center coordinates
       real(WP), dimension(3) :: vel        !< Velocity of particle
       real(WP), dimension(3) :: col        !< Collision force
+      real(WP) :: T_d                      !< Droplet temperature
       real(WP) :: dt                       !< Time step size for the particle
       !> MPI_INTEGER data
       integer , dimension(3) :: ind        !< Index of cell containing particle center
@@ -70,6 +71,7 @@ module lpt_class
       
       ! Solver parameters
       real(WP) :: nstep=1                                 !< Number of substeps (default=1)
+      real(WP) :: min_diam = 1e-6                         !< Minimum allowable particle diameter
       
       ! Collisional parameters
       real(WP) :: Tcol                                    !< Characteristic collision time scale
@@ -89,11 +91,14 @@ module lpt_class
       ! Particle volume fraction
       real(WP), dimension(:,:,:), allocatable :: VF       !< Particle volume fraction, cell-centered
       
-      ! Momentum source
+      ! Source terms
       real(WP), dimension(:,:,:), allocatable :: srcU     !< U momentum source on mesh, cell-centered
       real(WP), dimension(:,:,:), allocatable :: srcV     !< V momentum source on mesh, cell-centered
       real(WP), dimension(:,:,:), allocatable :: srcW     !< W momentum source on mesh, cell-centered
-      
+      real(WP), dimension(:,:,:), allocatable :: srcM     !< Mass source on mesh, cell-centered
+      real(WP), dimension(:,:,:), allocatable :: srcE     !< Energy source on mesh, cell-centered
+
+
       ! Filtering operation
       real(WP) :: filter_width                            !< Characteristic filter width
       real(WP), dimension(:,:,:,:), allocatable :: div_x,div_y,div_z    !< Divergence operator
@@ -152,6 +157,7 @@ contains
       allocate(self%srcU(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%srcU=0.0_WP
       allocate(self%srcV(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%srcV=0.0_WP
       allocate(self%srcW(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%srcW=0.0_WP
+      allocate(self%srcM(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%srcM=0.0_WP
       
       ! Set default filter width to zero by default
       self%filter_width=0.0_WP
@@ -478,8 +484,10 @@ contains
 
    
    !> Advance the particle equations by a specified time step dt
-   subroutine advance(this,dt,U,V,W,rho,visc)
+   subroutine advance(this,dt,U,V,W,rho,visc,T,Yf)
       use mathtools, only: Pi
+      use messager, only: die
+
       implicit none
       class(lpt), intent(inout) :: this
       real(WP), intent(inout) :: dt  !< Timestep size over which to advance
@@ -488,16 +496,20 @@ contains
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: W     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: rho   !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: visc  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: T     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: Yf   !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       integer :: i
       real(WP) :: mydt,dt_done
       real(WP), dimension(3) :: acc,dmom
       type(part) :: pold
+      real(WP) :: m_d,m_old,Mdot,Tdot ! drop mass
       
       ! Zero out source term arrays
       this%srcU=0.0_WP
       this%srcV=0.0_WP
-      this%srcW=0.0_WP
-      
+      this%srcW=0.0_WP 
+      this%srcM=0.0_WP ! called srcP in NGA; mass/pressure source term.
+      this%srcE=0.0_WP
       ! Advance the equations
       do i=1,this%np_
          ! Time-integrate until dt_done=dt
@@ -507,14 +519,35 @@ contains
             mydt=min(this%p(i)%dt,dt-dt_done)
             ! Remember the particle
             pold=this%p(i)
+            m_d = this%rho*Pi/6.0_WP*this%p(i)%d**3 ! current mass
+            m_old = m_d ! store old mass
             ! Advance with Euler prediction
-            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,p=this%p(i),acc=acc,opt_dt=this%p(i)%dt)
+            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),Tdot=Tdot,Mdot=Mdot,acc=acc,opt_dt=this%p(i)%dt)
+            ! Advance pos, vel 1st half
             this%p(i)%pos=pold%pos+0.5_WP*mydt*this%p(i)%vel
             this%p(i)%vel=pold%vel+0.5_WP*mydt*(acc+this%gravity+this%p(i)%col)
+            ! Advance mass loss 1st half
+            m_d = m_old+0.5_WP*mydt*Mdot
+            this%p(i)%d = (6.0_WP*m_d/(Pi*this%rho))**(1.0_WP/3.0_WP)
+            ! Advance energy transfer
+            this%p(i)%T_d = pold%T_d + 0.5_WP*mydt*Tdot
+
             ! Correct with midpoint rule
-            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,p=this%p(i),acc=acc,opt_dt=this%p(i)%dt)
+            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=this%p(i)%dt)
+            ! Advance pos, vel
             this%p(i)%pos=pold%pos+mydt*this%p(i)%vel
             this%p(i)%vel=pold%vel+mydt*(acc+this%gravity+this%p(i)%col)
+            ! Advance mass loss 2nd half
+            m_d = m_old+mydt*Mdot
+
+
+            this%p(i)%d = (6.0_WP*m_d/(Pi*this%rho))**(1.0_WP/3.0_WP)! translate new mass to new diameter
+            ! Advance energy transfer 2nd half
+            this%p(i)%T_d = pold%T_d + mydt*Tdot
+            print*,'Temp:',this%p(i)%T_d,'Diam:',this%p(i)%d
+            if (isnan(this%p(i)%T_d)) call die('NaN temp')
+            if (this%p(i)%d.le.this%min_diam) call die('Evaporated')
+
             ! Relocalize
             this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
             ! Send source term back to the mesh
@@ -522,6 +555,7 @@ contains
             if (this%cfg%nx.gt.1) call this%cfg%set_scalar(Sp=-dmom(1),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcU,bc='n')
             if (this%cfg%ny.gt.1) call this%cfg%set_scalar(Sp=-dmom(2),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcV,bc='n')
             if (this%cfg%nz.gt.1) call this%cfg%set_scalar(Sp=-dmom(3),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcW,bc='n')
+            !ignore temperature and mass for now...
             ! Increment
             dt_done=dt_done+mydt
          end do
@@ -566,16 +600,22 @@ contains
    
    
    !> Calculate RHS of the particle ODEs
-   subroutine get_rhs(this,U,V,W,rho,visc,p,acc,opt_dt)
+   subroutine get_rhs(this,U,V,W,rho,visc,T,Yf,p,acc,Tdot,Mdot,opt_dt)
+      use mathtools, only: Pi
+      use messager, only: die
       implicit none
+
       class(lpt), intent(inout) :: this
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: U     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: V     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: W     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: rho   !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: visc  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: T     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: Yf   !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       type(part), intent(in) :: p
       real(WP), dimension(3), intent(out) :: acc
+      real(WP), intent(out) :: Tdot,Mdot ! Temperature and mass time derivatives
       real(WP), intent(out) :: opt_dt
       real(WP) :: Re,corr,tau,b1,b2
       real(WP) :: fvisc,frho,pVF,fVF
@@ -584,7 +624,7 @@ contains
       fvel=this%cfg%get_velocity(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),U=U,V=V,W=W)
       ! Interpolate the fluid phase viscosity to the particle location
       fvisc=this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=visc,bc='n')
-      fvisc=fvisc+epsilon(1.0_WP)
+      !fvisc=fvisc+epsilon(1.0_WP)
       ! Interpolate the fluid phase density to the particle location
       frho=this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=rho,bc='n')
       ! Interpolate the particle volume fraction to the particle location
@@ -602,11 +642,79 @@ contains
       corr=fVF*(1.0_WP+0.15_WP*Re**(0.687_WP))/fVF**3+b1+b2
       ! Particle response time
       tau=this%rho*p%d**2/(18.0_WP*fvisc*corr)
-      ! Return acceleration and optimal timestep size
+      ! Return acceleration
       acc=fVF*(fvel-p%vel)/tau
-      opt_dt=tau/real(this%nstep,WP)
-   end subroutine get_rhs
 
+      evaporate_rhs : block
+         real(WP) :: Lv,W_g,W_l,R_cst,T_b,Cp_g,Cp_l ! Fluid properties
+         real(WP) :: Pr_g,Sc_g,Nu_g,Sh_g,Bm ! Non-dimensional numbers
+         real(WP) ::chi_eq_s,m_d,beta,f2 ! An assortment of things
+         real(WP) :: T_g,Yf_g,Yf_s ! Local gas temp, fuel mass fraction; drop surface mass fraction (from mesh)
+         real(WP) :: tau_acc,tau_mdot,tau_T ! determining fining for mass loss
+         real(WP) :: scale_tau
+
+         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+         ! Fluid properties: Hardcoded for now; should move to read from input !
+         !!!!!!!!!!!!!!!        CURRENTLY ETHANOL/AIR         !!!!!!!!!!!!!!!!!!
+         Lv = 918200_WP! Latent heat of vaporization [J/kg]
+         W_g = 0.0289_WP! Carrier gas molar weight [kg/mol]
+         W_l = 0.04607_WP! Drop molar weight [kg/mol]
+         R_cst = 8.314472_WP ! Gas constant [J/(kg*K)]
+         T_b = 351.5_WP ! Drop boiling point
+         Cp_g = 1200.0_WP ! Gas specific heat at constant pressure [J/(kg*K)]
+         Cp_l = 112.0_WP ! Drop specific heat at constant pressure [J/(kg*K)]
+
+         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+         ! Fluid properties: Hardcoded for now; should move to read from input !
+         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+         Pr_g = 0.7_WP
+         Sc_g = 0.7_WP
+         Nu_g = 2.0_WP+0.552_WP*(Re)**0.5_WP*(Pr_g)**(1.0_WP/3.0_WP)
+         Sh_g = 2.0_WP+0.552_WP*(Re)**0.5_WP*(Sc_g)**(1.0_WP/3.0_WP)
+         
+         chi_eq_s = exp(Lv*(1.0_WP/T_b-1.0_WP/p%T_d)/(R_cst/W_l))
+         Yf_s = (chi_eq_s)/(chi_eq_s+(1.0_WP-chi_eq_s)*(W_g/W_l))
+         
+         Yf_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=Yf,bc='n')! get T_g from interpolating T
+         ! Spalding number
+         Bm = (Yf_s-Yf_g)/(1.0_WP-Yf_s)
+
+         ! Mass transfer
+         m_d = (this%rho*Pi*p%d**3.0_WP)/6.0_WP
+         Mdot = -Sh_g*m_d*log(1.0_WP+Bm)/(3.0_WP*Sc_g*tau)
+         
+         ! Energy transfer
+         T_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=T,bc='n')! get T_g from interpolating T
+         beta = (-3.0_WP*Pr_g*tau/2.0_WP*Mdot/m_d)
+         f2 = beta/(exp(beta)-1.0_WP)
+         Tdot = Nu_g*Cp_g*f2*(T_g-p%T_d)/(3.0_WP*Pr_g*Cp_l*tau) + Mdot*Lv/(m_d*Cp_l)
+
+
+         ! A multiplier of temperature time step to decrease step size as drop diameter decreases:
+         if (p%d.ge.1e-3) then
+            scale_tau = 1.0_WP
+         elseif (p%d.ge.5e-4) then
+            scale_tau = 5.0_WP
+         elseif (p%d.ge.1e-4) then
+            scale_tau = 10.0_WP
+         elseif (p%d.ge.1e-5) then
+            scale_tau = 20.0_WP
+         end if
+         
+         ! Determine optimal time (inertial, thermal, mass loss)
+         tau_acc = abs(tau)/real(this%nstep,WP)
+         tau_mdot = abs(m_d/Mdot)
+         tau_T = abs((3.0_WP*Pr_g*Cp_l*tau)/(Nu_g*Cp_g*f2)*(T_b-p%T_d)/(T_g-p%T_d))/4.0_WP
+         opt_dt = min(tau_acc,tau_mdot,tau_T)
+         if (.not.((tau_T.ge.0.0_WP).or.(tau_T.lt.0.0_WP))) call die('NaN time constant')
+         ! if (tau_T.le.1.0_WP) call die('NaN time constant')
+         print*,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
+      end block evaporate_rhs
+
+
+   end subroutine get_rhs
 
    !> Update particle volume fraction using our current particles
    subroutine update_VF(this)

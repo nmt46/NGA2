@@ -10,17 +10,25 @@ ny :  20
 nz :  20
 
 # Case definition
-Droplet diameter :  0.01
+Droplet diameter :  0.0025
 Droplet center : 0 0 0
+Droplet temperature :       300
+Gas inlet temperature :     340
 
 # Fluid properties
-Drop dynamic viscosity :    1e-1
-Gas dynamic viscosity :       1e-3
-Drop density :              1000
+Drop dynamic viscosity :    1.2e-3
+Gas dynamic viscosity :     1.81e-5
+Droplet density :              1000
 Gas density :                 1
+Gas molar weight :          
+Gas specifc heat :
+Fuel molar weight :         
+Fuel boiling point :
+Fuel heat of vaporization : 
+Fuel specific heat : 
 
 # Time integration
-Max timestep size : 0.025
+Max timestep size : 0.02
 Max cfl number :    0.8
 Max time :          100
 
