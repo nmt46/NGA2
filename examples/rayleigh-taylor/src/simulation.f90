@@ -261,13 +261,13 @@ contains
             sc%SC=0.5_WP*(sc%SC+sc%SCold)
             
             ! Explicit calculation of drhoSC/dt from scalar equation
-            call sc%get_drhoSCdt(resSC,fs%rhoU,fs%rhoV,fs%rhoW)
+            call sc%get_drhoSCdt(resSC,fs%rhoU,fs%rhoV,fs%rhoW) ! resSC is drhoSC/dt [SC*kg/(m^3*s)]
             
             ! Assemble explicit residual
-            resSC=time%dt*resSC-(2.0_WP*sc%rho*sc%SC-(sc%rho+sc%rhoold)*sc%SCold)
+            resSC=time%dt*resSC-(2.0_WP*sc%rho*sc%SC-(sc%rho+sc%rhoold)*sc%SCold) ! resSC is now deltaRhoSC (taking time and half step into account) [SC*kg/m^3]
             
             ! Form implicit residual
-            call sc%solve_implicit(time%dt,resSC,fs%rhoU,fs%rhoV,fs%rhoW)
+            call sc%solve_implicit(time%dt,resSC,fs%rhoU,fs%rhoV,fs%rhoW) ! solution from RHS being fed into solve_implicit
             
             ! Apply this residual
             sc%SC=2.0_WP*sc%SC-sc%SCold+resSC
@@ -278,7 +278,7 @@ contains
             
             ! ============ UPDATE PROPERTIES ====================
             ! Backup rhoSC
-            resSC=sc%rho*sc%SC
+            resSC=sc%rho*sc%SC ! resSC is now rho*SC
             ! Update density
             call get_rho(mass=fluid_mass)
             ! Rescale scalar for conservation

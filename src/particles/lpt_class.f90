@@ -158,6 +158,8 @@ contains
       allocate(self%srcV(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%srcV=0.0_WP
       allocate(self%srcW(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%srcW=0.0_WP
       allocate(self%srcM(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%srcM=0.0_WP
+      allocate(self%srcE(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%srcE=0.0_WP
+
       
       ! Set default filter width to zero by default
       self%filter_width=0.0_WP
@@ -484,7 +486,7 @@ contains
 
    
    !> Advance the particle equations by a specified time step dt
-   subroutine advance(this,dt,U,V,W,rho,visc,T,Yf)
+   subroutine advance(this,dt,U,V,W,rho,visc,T,Yf,Bm_debug)
       use mathtools, only: Pi
       use messager, only: die
 
@@ -502,7 +504,11 @@ contains
       real(WP) :: mydt,dt_done
       real(WP), dimension(3) :: acc,dmom
       type(part) :: pold
-      real(WP) :: m_d,m_old,Mdot,Tdot ! drop mass
+      real(WP) :: m_d,m_old,Mdot,Tdot ! drop current, old mass; mdot of drop, Temp-dot of drop
+      real(WP) :: dm,dE ! mass loss (pure mass units) from beginning to end of time step
+      logical :: notEvap
+
+      real(WP)::Bm_debug
       
       ! Zero out source term arrays
       this%srcU=0.0_WP
@@ -514,7 +520,9 @@ contains
       do i=1,this%np_
          ! Time-integrate until dt_done=dt
          dt_done=0.0_WP
-         do while (dt_done.lt.dt)
+         notEvap = .true.
+         dm = 0.0_WP
+         do while ((dt_done.lt.dt).and.notEvap)
             ! Decide the timestep size
             mydt=min(this%p(i)%dt,dt-dt_done)
             ! Remember the particle
@@ -522,7 +530,7 @@ contains
             m_d = this%rho*Pi/6.0_WP*this%p(i)%d**3 ! current mass
             m_old = m_d ! store old mass
             ! Advance with Euler prediction
-            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),Tdot=Tdot,Mdot=Mdot,acc=acc,opt_dt=this%p(i)%dt)
+            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),Tdot=Tdot,Mdot=Mdot,acc=acc,opt_dt=this%p(i)%dt,Bm_debug=Bm_debug)
             ! Advance pos, vel 1st half
             this%p(i)%pos=pold%pos+0.5_WP*mydt*this%p(i)%vel
             this%p(i)%vel=pold%vel+0.5_WP*mydt*(acc+this%gravity+this%p(i)%col)
@@ -533,29 +541,63 @@ contains
             this%p(i)%T_d = pold%T_d + 0.5_WP*mydt*Tdot
 
             ! Correct with midpoint rule
-            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=this%p(i)%dt)
+            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=this%p(i)%dt,Bm_debug=Bm_debug)
             ! Advance pos, vel
             this%p(i)%pos=pold%pos+mydt*this%p(i)%vel
             this%p(i)%vel=pold%vel+mydt*(acc+this%gravity+this%p(i)%col)
             ! Advance mass loss 2nd half
             m_d = m_old+mydt*Mdot
-
+            dm = m_d-m_old;
 
             this%p(i)%d = (6.0_WP*m_d/(Pi*this%rho))**(1.0_WP/3.0_WP)! translate new mass to new diameter
             ! Advance energy transfer 2nd half
             this%p(i)%T_d = pold%T_d + mydt*Tdot
+
+            calc_sourceE: block
+               real(WP) :: Lv,W_g,W_l,R_cst,T_b,Cp_g,Cp_l ! Fluid properties
+               !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+               ! Fluid properties: Hardcoded for now; should move to read from input !
+               !!!!!!!!!!!!!!!        CURRENTLY ETHANOL/AIR         !!!!!!!!!!!!!!!!!!
+               Lv = 918200_WP! Latent heat of vaporization [J/kg]
+               W_g = 0.0289_WP! Carrier gas molar weight [kg/mol]
+               W_l = 0.04607_WP! Drop molar weight [kg/mol]
+               R_cst = 8.314472_WP ! Gas constant [J/(kg*K)]
+               T_b = 351.5_WP ! Drop boiling point
+               Cp_g = 1200.0_WP ! Gas specific heat at constant pressure [J/(kg*K)]
+               Cp_l = 112.0_WP ! Drop specific heat at constant pressure [J/(kg*K)]
+
+               !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+               ! Fluid properties: Hardcoded for now; should move to read from input !
+               !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+               dE = Cp_l*(this%p(i)%T_d*m_d-pold%T_d*m_old)+Lv*(m_old-m_d)
+
+
+            end block calc_sourceE
+
             print*,'Temp:',this%p(i)%T_d,'Diam:',this%p(i)%d
-            if (isnan(this%p(i)%T_d)) call die('NaN temp')
-            if (this%p(i)%d.le.this%min_diam) call die('Evaporated')
+            ! if (isnan(this%p(i)%T_d)) call die('NaN temp')
+
+            ! Evaporate away the drop by mainatinin conserved quanities
+            if (this%p(i)%d.le.this%min_diam) then
+               evaporate: block
+                  ! add to source terms when killing the drop
+                  dm = dm + this%rho*Pi/6.0_WP*this%p(i)%d**3
+                  this%p(i)%flag = 1
+                  notEvap = .false.
+               end block evaporate
+            end if
 
             ! Relocalize
             this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
             ! Send source term back to the mesh
             dmom=mydt*acc*this%rho*Pi/6.0_WP*this%p(i)%d**3
+            
             if (this%cfg%nx.gt.1) call this%cfg%set_scalar(Sp=-dmom(1),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcU,bc='n')
             if (this%cfg%ny.gt.1) call this%cfg%set_scalar(Sp=-dmom(2),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcV,bc='n')
             if (this%cfg%nz.gt.1) call this%cfg%set_scalar(Sp=-dmom(3),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcW,bc='n')
-            !ignore temperature and mass for now...
+            call this%cfg%set_scalar(Sp=-dm,pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcM,bc='n')
+            call this%cfg%set_scalar(Sp=-dE,pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcE,bc='n')
+
             ! Increment
             dt_done=dt_done+mydt
          end do
@@ -578,6 +620,8 @@ contains
       this%srcU=this%srcU/this%cfg%vol; call this%cfg%syncsum(this%srcU); call this%filter(this%srcU)
       this%srcV=this%srcV/this%cfg%vol; call this%cfg%syncsum(this%srcV); call this%filter(this%srcV)
       this%srcW=this%srcW/this%cfg%vol; call this%cfg%syncsum(this%srcW); call this%filter(this%srcW)
+      this%srcM=this%srcM/this%cfg%vol; call this%cfg%syncsum(this%srcM); call this%filter(this%srcM)
+      this%srcE=this%srcE/this%cfg%vol; call this%cfg%syncsum(this%srcE); call this%filter(this%srcE)
       
       ! Recompute volume fraction
       call this%update_VF()
@@ -600,7 +644,7 @@ contains
    
    
    !> Calculate RHS of the particle ODEs
-   subroutine get_rhs(this,U,V,W,rho,visc,T,Yf,p,acc,Tdot,Mdot,opt_dt)
+   subroutine get_rhs(this,U,V,W,rho,visc,T,Yf,p,acc,Tdot,Mdot,opt_dt,Bm_debug)
       use mathtools, only: Pi
       use messager, only: die
       implicit none
@@ -620,6 +664,7 @@ contains
       real(WP) :: Re,corr,tau,b1,b2
       real(WP) :: fvisc,frho,pVF,fVF
       real(WP), dimension(3) :: fvel
+      real(WP) :: Bm_debug
       ! Interpolate the fluid phase velocity to the particle location
       fvel=this%cfg%get_velocity(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),U=U,V=V,W=W)
       ! Interpolate the fluid phase viscosity to the particle location
@@ -680,39 +725,50 @@ contains
          Yf_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=Yf,bc='n')! get T_g from interpolating T
          ! Spalding number
          Bm = (Yf_s-Yf_g)/(1.0_WP-Yf_s)
-
+         Bm_debug = Bm
+         print*,'Spalding:',Bm
+         if (Bm.lt.0.0_WP) call die('Negative Spalding Number...')
          ! Mass transfer
          m_d = (this%rho*Pi*p%d**3.0_WP)/6.0_WP
          Mdot = -Sh_g*m_d*log(1.0_WP+Bm)/(3.0_WP*Sc_g*tau)
-         
+         print*,'Mdot:',Mdot
          ! Energy transfer
          T_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=T,bc='n')! get T_g from interpolating T
          beta = (-3.0_WP*Pr_g*tau/2.0_WP*Mdot/m_d)
          f2 = beta/(exp(beta)-1.0_WP)
          Tdot = Nu_g*Cp_g*f2*(T_g-p%T_d)/(3.0_WP*Pr_g*Cp_l*tau) + Mdot*Lv/(m_d*Cp_l)
-
+         print*,'Tdot:',Tdot
 
          ! A multiplier of temperature time step to decrease step size as drop diameter decreases:
-         if (p%d.ge.1e-3) then
-            scale_tau = 1.0_WP
-         elseif (p%d.ge.5e-4) then
-            scale_tau = 5.0_WP
-         elseif (p%d.ge.1e-4) then
-            scale_tau = 10.0_WP
-         elseif (p%d.ge.1e-5) then
-            scale_tau = 20.0_WP
-         end if
-         
+         ! if (p%d.ge.1e-3) then
+         !    scale_tau = 5.0_WP
+         ! elseif (p%d.ge.5e-4) then
+         !    scale_tau = 5.0_WP
+         ! elseif (p%d.ge.1e-4) then
+         !    scale_tau = 10.0_WP
+         ! elseif (p%d.ge.1e-5) then
+         !    scale_tau = 10.0_WP
+         ! else
+         !    scale_tau = 5.0_WP
+         ! end if
+         scale_tau = 5.0_WP
+
          ! Determine optimal time (inertial, thermal, mass loss)
          tau_acc = abs(tau)/real(this%nstep,WP)
          tau_mdot = abs(m_d/Mdot)
-         tau_T = abs((3.0_WP*Pr_g*Cp_l*tau)/(Nu_g*Cp_g*f2)*(T_b-p%T_d)/(T_g-p%T_d))/4.0_WP
-         opt_dt = min(tau_acc,tau_mdot,tau_T)
+         print*,'tau_mdot',tau_mdot
+         print*,'Nu_g:',Nu_g,'tau',tau,'f2',f2,'T_d',p%T_d
+         if ((T_g-p%T_d).eq.0.0_WP) then
+            tau_T = 1e3
+         else
+            tau_T = abs((3.0_WP*Pr_g*Cp_l*tau)/(Nu_g*Cp_g*f2)*(T_b-p%T_d)/(T_g-p%T_d))
+         end if
+         print*,'tau_T',tau_T
+         opt_dt = min(tau_acc,tau_mdot,tau_T)/scale_tau!/20.0_WP
          if (.not.((tau_T.ge.0.0_WP).or.(tau_T.lt.0.0_WP))) call die('NaN time constant')
          ! if (tau_T.le.1.0_WP) call die('NaN time constant')
          print*,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
       end block evaporate_rhs
-
 
    end subroutine get_rhs
 
