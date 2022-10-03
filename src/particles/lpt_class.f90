@@ -574,9 +574,9 @@ contains
 
             end block calc_sourceE
 
-            print*,'Temp:',this%p(i)%T_d,'Diam:',this%p(i)%d
+            ! print*,'Temp:',this%p(i)%T_d,'Diam:',this%p(i)%d
             ! if (isnan(this%p(i)%T_d)) call die('NaN temp')
-
+            ! print*,'np checkpoint 0',this%np
             ! Evaporate away the drop by mainatinin conserved quanities
             if (this%p(i)%d.le.this%min_diam) then
                evaporate: block
@@ -585,34 +585,38 @@ contains
                   this%p(i)%flag = 1
                   notEvap = .false.
                end block evaporate
+               ! print*,'np checkpoint 1',this%np
             end if
 
             ! Relocalize
             this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
             ! Send source term back to the mesh
             dmom=mydt*acc*this%rho*Pi/6.0_WP*this%p(i)%d**3
-            
+            ! print*,'np checkpoint 2',this%np
             if (this%cfg%nx.gt.1) call this%cfg%set_scalar(Sp=-dmom(1),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcU,bc='n')
             if (this%cfg%ny.gt.1) call this%cfg%set_scalar(Sp=-dmom(2),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcV,bc='n')
             if (this%cfg%nz.gt.1) call this%cfg%set_scalar(Sp=-dmom(3),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcW,bc='n')
             call this%cfg%set_scalar(Sp=-dm,pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcM,bc='n')
             call this%cfg%set_scalar(Sp=-dE,pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcE,bc='n')
-
+            ! print*,'np checkpoint 3',this%np
             ! Increment
             dt_done=dt_done+mydt
          end do
+         ! print*,'np checkpoint 4',this%np
          ! Correct the position to take into account periodicity
          if (this%cfg%xper) this%p(i)%pos(1)=this%cfg%x(this%cfg%imin)+modulo(this%p(i)%pos(1)-this%cfg%x(this%cfg%imin),this%cfg%xL)
          if (this%cfg%yper) this%p(i)%pos(2)=this%cfg%y(this%cfg%jmin)+modulo(this%p(i)%pos(2)-this%cfg%y(this%cfg%jmin),this%cfg%yL)
          if (this%cfg%zper) this%p(i)%pos(3)=this%cfg%z(this%cfg%kmin)+modulo(this%p(i)%pos(3)-this%cfg%z(this%cfg%kmin),this%cfg%zL)
+         ! print*,'np checkpoint 5',this%np
          ! Handle particles that have left the domain
          if (this%p(i)%pos(1).lt.this%cfg%x(this%cfg%imin).or.this%p(i)%pos(1).gt.this%cfg%x(this%cfg%imax+1)) this%p(i)%flag=1
          if (this%p(i)%pos(2).lt.this%cfg%y(this%cfg%jmin).or.this%p(i)%pos(2).gt.this%cfg%y(this%cfg%jmax+1)) this%p(i)%flag=1
          if (this%p(i)%pos(3).lt.this%cfg%z(this%cfg%kmin).or.this%p(i)%pos(3).gt.this%cfg%z(this%cfg%kmax+1)) this%p(i)%flag=1
+         ! print*,'np checkpoint 6',this%np
          ! Relocalize the particle
          this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
       end do
-      
+      ! print*,'np checkpoint 7',this%np
       ! Communicate particles
       call this%sync()
       
@@ -622,7 +626,7 @@ contains
       this%srcW=this%srcW/this%cfg%vol; call this%cfg%syncsum(this%srcW); call this%filter(this%srcW)
       this%srcM=this%srcM/this%cfg%vol; call this%cfg%syncsum(this%srcM); call this%filter(this%srcM)
       this%srcE=this%srcE/this%cfg%vol; call this%cfg%syncsum(this%srcE); call this%filter(this%srcE)
-      
+      ! print*,'np checkpoint 8',this%np
       ! Recompute volume fraction
       call this%update_VF()
       
@@ -639,7 +643,7 @@ contains
             if (verbose.gt.0) call log(message)
          end if
       end block logging
-      
+      ! print*,'np checkpoint 9',this%np
    end subroutine advance
    
    
@@ -664,7 +668,7 @@ contains
       real(WP) :: Re,corr,tau,b1,b2
       real(WP) :: fvisc,frho,pVF,fVF
       real(WP), dimension(3) :: fvel
-      real(WP) :: Bm_debug
+      real(WP),optional :: Bm_debug
       ! Interpolate the fluid phase velocity to the particle location
       fvel=this%cfg%get_velocity(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),U=U,V=V,W=W)
       ! Interpolate the fluid phase viscosity to the particle location
@@ -709,13 +713,13 @@ contains
          Cp_g = 1200.0_WP ! Gas specific heat at constant pressure [J/(kg*K)]
          Cp_l = 112.0_WP ! Drop specific heat at constant pressure [J/(kg*K)]
 
+         Pr_g = 0.7_WP
+         Sc_g = 1.5_WP
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
          ! Fluid properties: Hardcoded for now; should move to read from input !
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 
-         Pr_g = 0.7_WP
-         Sc_g = 0.7_WP
          Nu_g = 2.0_WP+0.552_WP*(Re)**0.5_WP*(Pr_g)**(1.0_WP/3.0_WP)
          Sh_g = 2.0_WP+0.552_WP*(Re)**0.5_WP*(Sc_g)**(1.0_WP/3.0_WP)
          
@@ -726,18 +730,18 @@ contains
          ! Spalding number
          Bm = (Yf_s-Yf_g)/(1.0_WP-Yf_s)
          Bm_debug = Bm
-         print*,'Spalding:',Bm
+         ! print*,'Spalding:',Bm,'Yf_g',Yf_g,'Yf_s',Yf_s
          if (Bm.lt.0.0_WP) call die('Negative Spalding Number...')
          ! Mass transfer
          m_d = (this%rho*Pi*p%d**3.0_WP)/6.0_WP
          Mdot = -Sh_g*m_d*log(1.0_WP+Bm)/(3.0_WP*Sc_g*tau)
-         print*,'Mdot:',Mdot
+         ! print*,'Mdot:',Mdot
          ! Energy transfer
          T_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=T,bc='n')! get T_g from interpolating T
          beta = (-3.0_WP*Pr_g*tau/2.0_WP*Mdot/m_d)
          f2 = beta/(exp(beta)-1.0_WP)
          Tdot = Nu_g*Cp_g*f2*(T_g-p%T_d)/(3.0_WP*Pr_g*Cp_l*tau) + Mdot*Lv/(m_d*Cp_l)
-         print*,'Tdot:',Tdot
+         ! print*,'Tdot:',Tdot
 
          ! A multiplier of temperature time step to decrease step size as drop diameter decreases:
          ! if (p%d.ge.1e-3) then
@@ -756,18 +760,18 @@ contains
          ! Determine optimal time (inertial, thermal, mass loss)
          tau_acc = abs(tau)/real(this%nstep,WP)
          tau_mdot = abs(m_d/Mdot)
-         print*,'tau_mdot',tau_mdot
-         print*,'Nu_g:',Nu_g,'tau',tau,'f2',f2,'T_d',p%T_d
+         ! print*,'tau_mdot',tau_mdot
+         ! print*,'Nu_g:',Nu_g,'tau',tau,'f2',f2,'T_d',p%T_d
          if ((T_g-p%T_d).eq.0.0_WP) then
             tau_T = 1e3
          else
             tau_T = abs((3.0_WP*Pr_g*Cp_l*tau)/(Nu_g*Cp_g*f2)*(T_b-p%T_d)/(T_g-p%T_d))
          end if
-         print*,'tau_T',tau_T
+         ! print*,'tau_T',tau_T
          opt_dt = min(tau_acc,tau_mdot,tau_T)/scale_tau!/20.0_WP
          if (.not.((tau_T.ge.0.0_WP).or.(tau_T.lt.0.0_WP))) call die('NaN time constant')
          ! if (tau_T.le.1.0_WP) call die('NaN time constant')
-         print*,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
+         ! print*,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
       end block evaporate_rhs
 
    end subroutine get_rhs

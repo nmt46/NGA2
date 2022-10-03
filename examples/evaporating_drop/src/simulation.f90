@@ -34,11 +34,13 @@ module simulation
    
    !> Fluid phase arrays
    real(WP), dimension(:,:,:), allocatable :: U,V,W,T,Yf
-   real(WP), dimension(:,:,:), allocatable :: rho,visc
+   ! real(WP), dimension(:,:,:), allocatable :: rho,visc
 
    !> Quantities for flow & scalar solvers:
    real(WP), dimension(:,:,:), allocatable :: resU,resV,resW,resT,resYf
    real(WP), dimension(:,:,:), allocatable :: Ui,Vi,Wi
+   real(WP) :: maxTemp_dt ! maximum allowable temperature change per time step [K/timeStep]
+   real(WP) :: T_dt_cur ! the current temperature-based max allowable timestep [sec]
 
 
    
@@ -223,9 +225,23 @@ contains
          Yf_sc%diff = diff_Yf
          ! Set densities
          fs%rho = Yf_sc%rho
+         call param_read('Max temperature change',maxTemp_dt)
       end block initialize_sc
 
-
+      !> Set initial time step to prevent excessive initial temperature change in droplets
+      init_drop_times: block
+         use messager, only: die
+         integer :: i
+         real(WP) :: min_dt
+         real(WP) :: Tdot,Mdot,opt_dt,Bm_debug
+         real(WP),dimension(3) :: acc
+         min_dt = time%dt
+         do i=1,lp%np_
+            call lp%get_rhs(U=fs%U,V=fs%V,W=fs%W,rho=fs%rho,visc=fs%visc,T=T_sc%SC,Yf=Yf_sc%SC,p=lp%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=opt_dt,Bm_debug=Bm_debug)
+            if (opt_dt.lt.min_dt) min_dt = opt_dt
+         end do
+         time%dt = min_dt
+      end block init_drop_times
 
       ! Create partmesh object for Lagrangian particle output
       create_pmesh: block
@@ -284,11 +300,13 @@ contains
          call mfile%add_column(T_sc%SCmax,'T_max')
          call mfile%add_column(lp%np,'N_part')
          ! call mfile%add_column(lp%VFmean,'Mean_VF')
-         call mfile%add_column(lp%p(1)%vel(1),'Part_U')
-         call mfile%add_column(lp%p(1)%vel(2),'Part_V')
-         call mfile%add_column(lp%p(1)%vel(3),'Part_W')
-         call mfile%add_column(lp%p(1)%d,'Part_d')
-         call mfile%add_column(lp%p(1)%T_d,'Part_T')
+         if (lp%cfg%amRoot) then
+            call mfile%add_column(lp%p(1)%vel(1),'Part_U')
+            call mfile%add_column(lp%p(1)%vel(2),'Part_V')
+            call mfile%add_column(lp%p(1)%vel(3),'Part_W')
+            call mfile%add_column(lp%p(1)%d,'Part_d')
+            call mfile%add_column(lp%p(1)%T_d,'Part_T')
+         end if
          call mfile%add_column(Bm_debug,'Spalding')
          call mfile%write()
 
@@ -303,14 +321,16 @@ contains
          call pfile%add_column(time%n,'T_step')
          call pfile%add_column(time%t,'Time')
          call pfile%add_column(time%dt,'dt')
-         call pfile%add_column(lp%p(1)%vel(1),'Part_U')
-         call pfile%add_column(lp%p(1)%vel(2),'Part_V')
-         call pfile%add_column(lp%p(1)%vel(3),'Part_W')
-         call pfile%add_column(lp%p(1)%d,'Part_d')
-         call pfile%add_column(lp%p(1)%T_d,'Part_T')
+         if (lp%cfg%amRoot) then
+            call pfile%add_column(lp%p(1)%vel(1),'Part_U')
+            call pfile%add_column(lp%p(1)%vel(2),'Part_V')
+            call pfile%add_column(lp%p(1)%vel(3),'Part_W')
+            call pfile%add_column(lp%p(1)%d,'Part_d')
+            call pfile%add_column(lp%p(1)%T_d,'Part_T')
+         end if
          call pfile%write()
       end block create_monitor
-      
+
    end subroutine simulation_init
    
    
@@ -318,15 +338,17 @@ contains
    subroutine simulation_run
       implicit none
       logical :: amDone = .false.
-      print*,'max rho1',maxval(Yf_sc%rho)
+      T_dt_cur = time%dt
+      ! print*,'max rho1',maxval(Yf_sc%rho)
       ! Perform time integration
       do while (.not.time%done().and.(.not.amDone))
          
          ! Increment time         
          call fs%get_cfl(time%dt,time%cfl)
          call time%adjust_dt()
+         ! if (time%dt.gt.T_dt_cur) time%dt = T_dt_cur
          call time%increment()
-
+         ! print*,'New dt:',time%dt
 
          ! Update scalars & flow field:
 
@@ -346,7 +368,7 @@ contains
          
          ! Apply time-varying Dirichlet conditions
          ! This is where time-dpt Dirichlet would be enforced
-         print*,'here0'
+         ! print*,'here0'
          ! Perform sub-iterations
          do while (time%it.le.time%itmax)
             
@@ -358,7 +380,7 @@ contains
             ! Explicit calculation of drhoSC/dt from scalar equation
             call T_sc%get_drhoSCdt(resT,fs%rhoU,fs%rhoV,fs%rhoW)
             call Yf_sc%get_drhoSCdt(resYf,fs%rhoU,fs%rhoV,fs%rhoW)
-            print*,'here0A',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0A',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
 
             ! Assemble explicit residual            
             resT=time%dt*resT-(2.0_WP*T_sc%rho*T_sc%SC-(T_sc%rho+T_sc%rhoold)*T_sc%SCold)
@@ -382,7 +404,7 @@ contains
             ! Form implicit residual
             call T_sc%solve_implicit(time%dt,resT,fs%rhoU,fs%rhoV,fs%rhoW)
             call Yf_sc%solve_implicit(time%dt,resYf,fs%rhoU,fs%rhoV,fs%rhoW)
-            print*,'here0B',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0B',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Apply this residual
             T_sc%SC=2.0_WP*T_sc%SC-T_sc%SCold+resT
             Yf_sc%SC=2.0_WP*Yf_sc%SC-Yf_sc%SCold+resYf
@@ -398,15 +420,15 @@ contains
                end do
             end block clip_Yf
 
-            print*,'max rho2',maxval(Yf_sc%rho)
+            ! print*,'max rho2',maxval(Yf_sc%rho)
             
             ! Apply other boundary conditions on the resulting field
             call T_sc%apply_bcond(time%t,time%dt)
             call Yf_sc%apply_bcond(time%t,time%dt)
-            print*,'here0C',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
-            print*,'max rho3',maxval(Yf_sc%rho)
-            print*,'max Yf',maxval(Yf_sc%SC)
-            print*,'max T',maxval(T_sc%SC)
+            ! print*,'here0C',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'max rho3',maxval(Yf_sc%rho)
+            ! print*,'max Yf',maxval(Yf_sc%SC)
+            ! print*,'max T',maxval(T_sc%SC)
             ! ===================================================
             
             ! ============ UPDATE PROPERTIES ====================
@@ -416,7 +438,7 @@ contains
 
             ! Update density
             ! call get_rho()
-            print*,'here0D',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0D',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Rescale scalar for conservation
             !sc%SC=resSC/sc%rho
             ! UPDATE THE VISCOSITY
@@ -424,7 +446,7 @@ contains
             ! ===================================================
             
             ! ============ VELOCITY SOLVER ======================
-            print*,'max rho4',maxval(Yf_sc%rho)
+            ! print*,'max rho4',maxval(Yf_sc%rho)
             ! Build n+1 density
             fs%rho=0.5_WP*(Yf_sc%rho+Yf_sc%rhoold)
             
@@ -435,7 +457,7 @@ contains
             
             ! Explicit calculation of drho*u/dt from NS
             call fs%get_dmomdt(resU,resV,resW)
-            print*,'here0E',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0E',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             
             ! Assemble explicit residual
             resU=time%dtmid*resU-(2.0_WP*fs%rhoU-2.0_WP*fs%rhoUold)
@@ -454,11 +476,11 @@ contains
                   end do
                end do
             end block add_lpt_src
-            print*,'here0F',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0F',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Form implicit residuals
             call fs%solve_implicit(time%dtmid,resU,resV,resW)
-            print*,'here0G',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
-            print*,'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
+            ! print*,'here0G',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
+            ! print*,'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
             ! Apply these residuals
             fs%U=2.0_WP*fs%U-fs%Uold+resU
             fs%V=2.0_WP*fs%V-fs%Vold+resV
@@ -468,7 +490,7 @@ contains
             call fs%apply_bcond(time%tmid,time%dtmid)
             call fs%rho_multiply()
             call fs%apply_bcond(time%tmid,time%dtmid)
-            print*,'here0H',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
+            ! print*,'here0H',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
             ! This is where dirichlet BCs would go
 
             ! Solve Poisson equation
@@ -480,44 +502,55 @@ contains
             fs%psolv%sol=0.0_WP
             call fs%psolv%solve()
             call fs%shift_p(fs%psolv%sol)
-            print*,'here0I',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
+            ! print*,'here0I',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
             ! Correct momentum and rebuild velocity
             call fs%get_pgrad(fs%psolv%sol,resU,resV,resW)
-            print*,'here0J',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
+            ! print*,'here0J',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
             fs%P=fs%P+fs%psolv%sol
-            print*,'here0K',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
-            print*,'rhoU',maxval(fs%rhoU),'resU',maxval(resU),'dt*res',maxval(-time%dtmid*resU)
+            ! print*,'here0K',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
+            ! print*,'rhoU',maxval(fs%rhoU),'resU',maxval(resU),'dt*res',maxval(-time%dtmid*resU)
             fs%rhoU=fs%rhoU-time%dtmid*resU
             fs%rhoV=fs%rhoV-time%dtmid*resV
             fs%rhoW=fs%rhoW-time%dtmid*resW
             
-            print*,'here0L',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0L',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             call fs%rho_divide
             ! ===================================================
-            print*,'here0M',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0M',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Increment sub-iteration counter
             time%it=time%it+1
          end do
-         print*,'here1'
+         ! print*,'here1'
          ! Advance particles by dt
-         print*,'U=',maxval(fs%U),'V=',maxval(fs%V),'W=',maxval(fs%W),'rho=',maxval(fs%rho),'visc=',maxval(fs%visc),'T=',maxval(T_sc%SC),'Yf=',maxval(Yf_sc%SC)
+         ! print*,'U=',maxval(fs%U),'V=',maxval(fs%V),'W=',maxval(fs%W),'rho=',maxval(fs%rho),'visc=',maxval(fs%visc),'T=',maxval(T_sc%SC),'Yf=',maxval(Yf_sc%SC)
          call lp%advance(dt=time%dt,U=fs%U,V=fs%V,W=fs%W,rho=fs%rho,visc=fs%visc,T=T_sc%SC,Yf=Yf_sc%SC,Bm_debug=Bm_debug)
-         print*,'here2'
+         ! Use new source terms to determine if need to reduce next time step
+         if (maxval(abs(lp%srcE)).gt.(0.0_WP)) then
+            temp_dt_control: block
+               real(WP) :: Cp_g = 1200.0_WP
+               real(WP) :: dT_cur ! maximum temperature increase per time step across mesh
+               dT_cur = maxval(T_sc%SC-T_sc%SCold)
+               ! dT_cur = maxval(abs(lp%srcE/(fs%rho*Cp_g))) ! [K/timeStep]
+               if (abs(dT_cur).gt.abs(maxTemp_dt)) T_dt_cur = time%dt*abs(maxTemp_dt/dT_cur)
+               ! print*,'dT_cur [K]',abs(dT_cur),'T_dt_cur [s]',T_dt_cur
+            end block temp_dt_control
+         end if
+         ! print*,'here2'
          if (lp%np.eq.0) amDone=.true.
          ! Output to ensight
-         if (ens_evt%occurs()) then
-            ensight_output: block
-               integer :: i
-               call lp%update_partmesh(pmesh)
-               do i = 1,lp%np_
-                  pmesh%var(1,i)=0.5_WP*lp%p(i)%d ! Droplet Radius
-                  pmesh%var(2,i)=lp%p(i)%T_d ! Droplet Temperature
-               end do
+         ! if (ens_evt%occurs()) then
+         !    ensight_output: block
+         !       integer :: i
+         !       call lp%update_partmesh(pmesh)
+         !       do i = 1,lp%np_
+         !          pmesh%var(1,i)=0.5_WP*lp%p(i)%d ! Droplet Radius
+         !          pmesh%var(2,i)=lp%p(i)%T_d ! Droplet Temperature
+         !       end do
       
-               call ens_out%write_data(time%t)
-               end block ensight_output
-         end if
-         print*,'here3'
+         !       call ens_out%write_data(time%t)
+         !       end block ensight_output
+         ! end if
+         ! print*,'here3'
          ! Perform and output monitoring
          call lp%get_max()
          call fs%get_max()
@@ -526,7 +559,7 @@ contains
          call cflFile%write()
          call mfile%write()
          call pfile%write()
-         print*,'here4'
+         ! print*,'here4'
       end do
       
    end subroutine simulation_run

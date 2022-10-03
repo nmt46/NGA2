@@ -2,17 +2,17 @@
 Partition : 1 1 1
 
 # Mesh definition
-Lx :  2e-2
-Ly :  2e-2
-Lz :  2e-2
+Lx :  5e-2
+Ly :  5e-2
+Lz :  5e-2
 nx :  20
 ny :  20
 nz :  20
 
 # Case definition
-Droplet diameter :  609e-6
+Droplet diameter :  250e-6
 Droplet center : 0 0 0
-Droplet temperature :       300
+Droplet temperature :       280
 Droplet velocity :          0 0 0
 Gas inlet temperature :     473
 
@@ -28,12 +28,13 @@ Fuel boiling point :
 Fuel heat of vaporization : 
 Fuel specific heat : 
 Thermal diffusivity : 2e-5 ! from engineeringtoolbox; [m^2/s]
-Fuel diffusivity : 1e-5 ! A random number I decided to use
+Fuel diffusivity : 11e-6 !http://webserver.dmt.upm.es/~isidoro/dat1/Mass%20diffusivity%20data.pdf
 
 # Time integration
-Max timestep size : 0.25
+Max timestep size : 0.15
 Max cfl number :    0.8
 Max time :          100
+Max temperature change : 10 ! the maximum allowable temperature change per time step [K/timeStep]
 
 # Pressure solver
 Pressure tolerance : 1e-6
