@@ -755,8 +755,11 @@ contains
          ! else
          !    scale_tau = 5.0_WP
          ! end if
-         scale_tau = 5.0_WP
-
+         if (Tdot.lt.-500.0_WP) then
+            scale_tau = 5.0_WP*abs(Tdot/500.0_WP)
+         else
+            scale_tau = 5.0_WP
+         end if
          ! Determine optimal time (inertial, thermal, mass loss)
          tau_acc = abs(tau)/real(this%nstep,WP)
          tau_mdot = abs(m_d/Mdot)
@@ -767,8 +770,8 @@ contains
          else
             tau_T = abs((3.0_WP*Pr_g*Cp_l*tau)/(Nu_g*Cp_g*f2)*(T_b-p%T_d)/(T_g-p%T_d))
          end if
-         ! print*,'tau_T',tau_T
          opt_dt = min(tau_acc,tau_mdot,tau_T)/scale_tau!/20.0_WP
+         ! print*,'tau_T',tau_T,'T_dot:',Tdot,'T:',p%T_d,'opt_dt',opt_dt
          if (.not.((tau_T.ge.0.0_WP).or.(tau_T.lt.0.0_WP))) call die('NaN time constant')
          ! if (tau_T.le.1.0_WP) call die('NaN time constant')
          ! print*,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
