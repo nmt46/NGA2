@@ -504,7 +504,7 @@ contains
       real(WP) :: mydt,dt_done
       real(WP), dimension(3) :: acc,dmom
       type(part) :: pold
-      real(WP) :: m_d,m_old,Mdot,Tdot ! drop current, old mass; mdot of drop, Temp-dot of drop
+      real(WP) :: m_d,m_old,Mdot,Tdot,TdotMid ! drop current, old mass; mdot of drop, Temp-dot of drop
       real(WP) :: dm,dE ! mass loss (pure mass units) from beginning to end of time step
       logical :: notEvap
 
@@ -522,7 +522,10 @@ contains
          dt_done=0.0_WP
          notEvap = .true.
          dm = 0.0_WP
+         Tdot = 0.0_WP
+         TdotMid = 0.0_WP   
          do while ((dt_done.lt.dt).and.notEvap)
+            if (((Tdot.gt.0.0_WP).and.(TdotMid.lt.0.0_WP)).or.(((Tdot.lt.0.0_WP).and.(TdotMid.gt.0.0_WP)))) this%p(i)%dt = 0.5_WP*this%p(i)%dt
             ! Decide the timestep size
             mydt=min(this%p(i)%dt,dt-dt_done)
             ! Remember the particle
@@ -540,6 +543,7 @@ contains
             ! Advance energy transfer
             this%p(i)%T_d = pold%T_d + 0.5_WP*mydt*Tdot
 
+            TdotMid = Tdot
             ! Correct with midpoint rule
             call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=this%p(i)%dt,Bm_debug=Bm_debug)
             ! Advance pos, vel
@@ -728,6 +732,7 @@ contains
          
          Yf_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=Yf,bc='n')! get T_g from interpolating T
          ! Spalding number
+         ! print*,'Yf_s',Yf_s,'Yf_g',Yf_g
          Bm = (Yf_s-Yf_g)/(1.0_WP-Yf_s)
          Bm_debug = Bm
          ! print*,'Spalding:',Bm,'Yf_g',Yf_g,'Yf_s',Yf_s
