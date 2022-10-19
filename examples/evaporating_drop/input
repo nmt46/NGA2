@@ -17,18 +17,17 @@ Droplet velocity :          0 0 0
 Gas inlet temperature :     473
 
 # Fluid properties
-Drop dynamic viscosity :    1.0794e-3
-Gas dynamic viscosity :     1.81e-5
-Droplet density :           790
-Gas density :               1
-Gas molar weight :          
-Gas specifc heat :
-Fuel molar weight :         
-Fuel boiling point :
-Fuel heat of vaporization : 
-Fuel specific heat : 
-Thermal diffusivity : 2e-5 ! from engineeringtoolbox; [m^2/s]
-Fuel diffusivity : 11e-6 !http://webserver.dmt.upm.es/~isidoro/dat1/Mass%20diffusivity%20data.pdf
+# Drop dynamic viscosity :    1.0794e-3
+# Gas dynamic viscosity :     1.81e-5
+# Droplet density :           790
+# Gas density :               1
+Fuel :                      ethanol
+Fuel-gas Schmidt number:    1.5
+Gas :                       air
+Gas Prandtl number:         0.7
+Pressure :                  101325
+Thermal diffusivity :       2e-5 ! from engineeringtoolbox; [m^2/s]
+Fuel diffusivity :          11e-6 !http://webserver.dmt.upm.es/~isidoro/dat1/Mass%20diffusivity%20data.pdf
 
 # Time integration
 Max timestep size : 0.15

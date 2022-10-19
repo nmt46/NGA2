@@ -8,6 +8,7 @@ USE_HYPRE = TRUE
 USE_LAPACK= TRUE
 USE_IRL   = TRUE
 PROFILE   = FALSE
+USE_COOLPROP= TRUE
 DEBUG     = TRUE
 COMP      = gnu
 EXEBASE   = nga
@@ -26,6 +27,7 @@ VPATH_LOCATIONS   += $(Ulocs)
 HYPRE_DIR = /Users/natethompson/Builds/hypre
 IRL_DIR   = /Users/natethompson/Builds/IRL
 LAPACK_DIR= /usr/local/Cellar/lapack
+COOLPROP_DIR= /Users/natethompson/Repositories/CoolProp
 
 # NGA compilation definitions
 include $(NGA_HOME)/tools/GNUMake/Make.defs

@@ -486,12 +486,15 @@ contains
 
    
    !> Advance the particle equations by a specified time step dt
-   subroutine advance(this,dt,U,V,W,rho,visc,T,Yf,Bm_debug)
+   subroutine advance(this,dt,U,V,W,rho,visc,T,Yf,Bm_debug,lTab,gTab,p_therm)
       use mathtools, only: Pi
       use messager, only: die
+      use fluidTable_class, only: fluidTable
 
       implicit none
       class(lpt), intent(inout) :: this
+      type(fluidTable), intent(inout) :: lTab,gTab ! Fluid property tables for drop and surrounding gas
+      real(WP), intent(in) :: p_therm ! thermodynamic pressure
       real(WP), intent(inout) :: dt  !< Timestep size over which to advance
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: U     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: V     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
@@ -505,7 +508,7 @@ contains
       real(WP), dimension(3) :: acc,dmom
       type(part) :: pold
       real(WP) :: m_d,m_old,Mdot,Tdot,TdotMid ! drop current, old mass; mdot of drop, Temp-dot of drop
-      real(WP) :: dm,dE ! mass loss (pure mass units) from beginning to end of time step
+      real(WP) :: dm,dE ! mass,energy change (pure mass,energy units) from beginning to end of time step
       logical :: notEvap
 
       real(WP)::Bm_debug
@@ -533,7 +536,8 @@ contains
             m_d = this%rho*Pi/6.0_WP*this%p(i)%d**3 ! current mass
             m_old = m_d ! store old mass
             ! Advance with Euler prediction
-            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),Tdot=Tdot,Mdot=Mdot,acc=acc,opt_dt=this%p(i)%dt,Bm_debug=Bm_debug)
+            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),Tdot=Tdot,Mdot=Mdot,acc=acc,opt_dt=this%p(i)%dt,&
+               Bm_debug=Bm_debug,lTab=lTab,gTab=gTab,p_therm=p_therm)
             ! Advance pos, vel 1st half
             this%p(i)%pos=pold%pos+0.5_WP*mydt*this%p(i)%vel
             this%p(i)%vel=pold%vel+0.5_WP*mydt*(acc+this%gravity+this%p(i)%col)
@@ -542,10 +546,10 @@ contains
             this%p(i)%d = (6.0_WP*m_d/(Pi*this%rho))**(1.0_WP/3.0_WP)
             ! Advance energy transfer
             this%p(i)%T_d = pold%T_d + 0.5_WP*mydt*Tdot
-
             TdotMid = Tdot
             ! Correct with midpoint rule
-            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=this%p(i)%dt,Bm_debug=Bm_debug)
+            call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=this%p(i)%dt,&
+               Bm_debug=Bm_debug,lTab=lTab,gTab=gTab,p_therm=p_therm)
             ! Advance pos, vel
             this%p(i)%pos=pold%pos+mydt*this%p(i)%vel
             this%p(i)%vel=pold%vel+mydt*(acc+this%gravity+this%p(i)%col)
@@ -558,39 +562,21 @@ contains
             this%p(i)%T_d = pold%T_d + mydt*Tdot
 
             calc_sourceE: block
-               real(WP) :: Lv,W_g,W_l,R_cst,T_b,Cp_g,Cp_l ! Fluid properties
-               !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-               ! Fluid properties: Hardcoded for now; should move to read from input !
-               !!!!!!!!!!!!!!!        CURRENTLY ETHANOL/AIR         !!!!!!!!!!!!!!!!!!
-               Lv = 918200_WP! Latent heat of vaporization [J/kg]
-               W_g = 0.0289_WP! Carrier gas molar weight [kg/mol]
-               W_l = 0.04607_WP! Drop molar weight [kg/mol]
-               R_cst = 8.314472_WP ! Gas constant [J/(kg*K)]
-               T_b = 351.5_WP ! Drop boiling point
-               Cp_g = 1200.0_WP ! Gas specific heat at constant pressure [J/(kg*K)]
-               Cp_l = 112.0_WP ! Drop specific heat at constant pressure [J/(kg*K)]
-
-               !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-               ! Fluid properties: Hardcoded for now; should move to read from input !
-               !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+               use fluidTable_class, only: Lv_ID, Cp_ID
+               real(WP) :: Lv,Cp_l ! Fluid properties
+               call lTab%evalProps(propOut=Lv,  T_q=(pold%T_d+this%p(i)%T_d)/2.0_WP,P_q=p_therm,propID=Lv_ID) ! Latent heat of vaporization [J/kg]
+               call lTab%evalProps(propOut=Cp_l,T_q=(pold%T_d+this%p(i)%T_d)/2.0_WP,P_q=p_therm,propID=Cp_ID) ! Drop specific heat at constant pressure [J/(kg*K)]
                dE = Cp_l*(this%p(i)%T_d*m_d-pold%T_d*m_old)+Lv*(m_old-m_d)
-
-
+               ! Evaporate away the drop by mainatinin conserved quanities
+               if (this%p(i)%d.le.this%min_diam) then
+                     ! add to source terms when killing the drop
+                     dm = dm + this%rho*Pi/6.0_WP*this%p(i)%d**3
+                     dE = dE - Lv*m_d
+                     this%p(i)%flag = 1
+                     notEvap = .false.
+               end if
+                  ! print*,'np checkpoint 1',this%np
             end block calc_sourceE
-
-            ! print*,'Temp:',this%p(i)%T_d,'Diam:',this%p(i)%d
-            ! if (isnan(this%p(i)%T_d)) call die('NaN temp')
-            ! print*,'np checkpoint 0',this%np
-            ! Evaporate away the drop by mainatinin conserved quanities
-            if (this%p(i)%d.le.this%min_diam) then
-               evaporate: block
-                  ! add to source terms when killing the drop
-                  dm = dm + this%rho*Pi/6.0_WP*this%p(i)%d**3
-                  this%p(i)%flag = 1
-                  notEvap = .false.
-               end block evaporate
-               ! print*,'np checkpoint 1',this%np
-            end if
 
             ! Relocalize
             this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
@@ -652,12 +638,15 @@ contains
    
    
    !> Calculate RHS of the particle ODEs
-   subroutine get_rhs(this,U,V,W,rho,visc,T,Yf,p,acc,Tdot,Mdot,opt_dt,Bm_debug)
+   subroutine get_rhs(this,U,V,W,rho,visc,T,Yf,p,acc,Tdot,Mdot,opt_dt,Bm_debug,lTab,gTab,p_therm)
       use mathtools, only: Pi
       use messager, only: die
+      use fluidTable_class, only: fluidTable,mu_ID
       implicit none
 
       class(lpt), intent(inout) :: this
+      class(fluidTable), intent(inout) :: lTab,gTab
+      real(WP), intent(in) :: p_therm ! thermodynamic pressure
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: U     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: V     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: W     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
@@ -680,6 +669,7 @@ contains
       !fvisc=fvisc+epsilon(1.0_WP)
       ! Interpolate the fluid phase density to the particle location
       frho=this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=rho,bc='n')
+      ! print*,'frho:',frho
       ! Interpolate the particle volume fraction to the particle location
       pVF=this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=this%VF,bc='n')
       fVF=1.0_WP-pVF
@@ -699,6 +689,7 @@ contains
       acc=fVF*(fvel-p%vel)/tau
 
       evaporate_rhs : block
+         use fluidTable_class, only: Cp_ID,Lv_ID,Tb_ID
          real(WP) :: Lv,W_g,W_l,R_cst,T_b,Cp_g,Cp_l ! Fluid properties
          real(WP) :: Pr_g,Sc_g,Nu_g,Sh_g,Bm ! Non-dimensional numbers
          real(WP) ::chi_eq_s,m_d,beta,f2 ! An assortment of things
@@ -706,21 +697,21 @@ contains
          real(WP) :: tau_acc,tau_mdot,tau_T ! determining fining for mass loss
          real(WP) :: scale_tau
 
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-         ! Fluid properties: Hardcoded for now; should move to read from input !
-         !!!!!!!!!!!!!!!        CURRENTLY ETHANOL/AIR         !!!!!!!!!!!!!!!!!!
-         Lv = 918200_WP! Latent heat of vaporization [J/kg]
-         W_g = 0.0289_WP! Carrier gas molar weight [kg/mol]
-         W_l = 0.04607_WP! Drop molar weight [kg/mol]
-         R_cst = 8.314472_WP ! Gas constant [J/(kg*K)]
-         T_b = 351.5_WP ! Drop boiling point
-         Cp_g = 1200.0_WP ! Gas specific heat at constant pressure [J/(kg*K)]
-         Cp_l = 112.0_WP ! Drop specific heat at constant pressure [J/(kg*K)]
+         
+         T_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=T,bc='n')! get T_g from interpolating T
 
-         Pr_g = 0.7_WP
-         Sc_g = 1.5_WP
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-         ! Fluid properties: Hardcoded for now; should move to read from input !
+         W_g = gTab%MW ! Carrier gas molar weight [kg/mol]
+         W_l = lTab%MW ! Drop molar weight [kg/mol]
+         call lTab%evalProps(propOut=Lv,T_q=p%T_d,P_q=p_therm,propID=Lv_ID) ! Latent heat of vaporization [J/kg]
+         R_cst = 8.314472_WP ! Gas constant [J/(kg*K)]
+         call lTab%evalProps(propOut=T_b,T_q=p%T_d,P_q=p_therm,propID=Tb_ID) ! Drop boiling point [K]
+         ! Drop boiling point
+         call gTab%evalProps(propOut=Cp_g,T_q=T_g,P_q=p_therm,propID=Cp_ID) ! Gas specific heat at constant pressure [J/(kg*K)]
+         call lTab%evalProps(propOut=Cp_l,T_q=p%T_d,P_q=p_therm,propID=Cp_ID) ! Drop specific heat at constant pressure [J/(kg*K)]
+
+         Pr_g = gTab%Pr
+         Sc_g = gTab%Sc
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 
@@ -731,18 +722,19 @@ contains
          Yf_s = (chi_eq_s)/(chi_eq_s+(1.0_WP-chi_eq_s)*(W_g/W_l))
          
          Yf_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=Yf,bc='n')! get T_g from interpolating T
+         if (Yf_g.lt.0.0_WP) Yf_g = 0.0_WP ! Clip away negative Yf noise
          ! Spalding number
          ! print*,'Yf_s',Yf_s,'Yf_g',Yf_g
          Bm = (Yf_s-Yf_g)/(1.0_WP-Yf_s)
          Bm_debug = Bm
-         ! print*,'Spalding:',Bm,'Yf_g',Yf_g,'Yf_s',Yf_s
-         if (Bm.lt.0.0_WP) call die('Negative Spalding Number...')
+         ! print*,'Spalding:',Bm,'Yf_g',Yf_g,'Yf_s',Yf_s,'T_d',p%T_d
+         if (Bm.lt.-1.0_WP) call die('Spaulding Number Less than -1...')
          ! Mass transfer
          m_d = (this%rho*Pi*p%d**3.0_WP)/6.0_WP
          Mdot = -Sh_g*m_d*log(1.0_WP+Bm)/(3.0_WP*Sc_g*tau)
          ! print*,'Mdot:',Mdot
+
          ! Energy transfer
-         T_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=T,bc='n')! get T_g from interpolating T
          beta = (-3.0_WP*Pr_g*tau/2.0_WP*Mdot/m_d)
          f2 = beta/(exp(beta)-1.0_WP)
          Tdot = Nu_g*Cp_g*f2*(T_g-p%T_d)/(3.0_WP*Pr_g*Cp_l*tau) + Mdot*Lv/(m_d*Cp_l)
@@ -761,13 +753,17 @@ contains
          !    scale_tau = 5.0_WP
          ! end if
          if (Tdot.lt.-500.0_WP) then
-            scale_tau = 5.0_WP*abs(Tdot/500.0_WP)
+            scale_tau = 1.0_WP!*abs(Tdot/500.0_WP)
          else
-            scale_tau = 5.0_WP
+            scale_tau = 1.0_WP
          end if
          ! Determine optimal time (inertial, thermal, mass loss)
          tau_acc = abs(tau)/real(this%nstep,WP)
+         if (Mdot.eq.0.0_WP) then
+            tau_mdot = abs(m_d/epsilon(1.0_WP))
+         else
          tau_mdot = abs(m_d/Mdot)
+         end if
          ! print*,'tau_mdot',tau_mdot
          ! print*,'Nu_g:',Nu_g,'tau',tau,'f2',f2,'T_d',p%T_d
          if ((T_g-p%T_d).eq.0.0_WP) then
@@ -776,7 +772,7 @@ contains
             tau_T = abs((3.0_WP*Pr_g*Cp_l*tau)/(Nu_g*Cp_g*f2)*(T_b-p%T_d)/(T_g-p%T_d))
          end if
          opt_dt = min(tau_acc,tau_mdot,tau_T)/scale_tau!/20.0_WP
-         ! print*,'tau_T',tau_T,'T_dot:',Tdot,'T:',p%T_d,'opt_dt',opt_dt
+         ! print*,'tau_T',tau_T,'T_dot:',Tdot,'T_d:',p%T_d,'T_g',T_g,'opt_dt',opt_dt
          if (.not.((tau_T.ge.0.0_WP).or.(tau_T.lt.0.0_WP))) call die('NaN time constant')
          ! if (tau_T.le.1.0_WP) call die('NaN time constant')
          ! print*,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T

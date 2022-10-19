@@ -10,6 +10,7 @@ module simulation
    use partmesh_class,    only: partmesh
    use event_class,       only: event
    use monitor_class,     only: monitor
+   use fluidTable_class,  only: fluidTable
    implicit none
    private
    
@@ -35,6 +36,7 @@ module simulation
    !> Fluid phase arrays
    real(WP), dimension(:,:,:), allocatable :: U,V,W,T,Yf
    ! real(WP), dimension(:,:,:), allocatable :: rho,visc
+   real(WP) :: p0 ! ambient pressure
 
    !> Quantities for flow & scalar solvers:
    real(WP), dimension(:,:,:), allocatable :: resU,resV,resW,resT,resYf
@@ -42,27 +44,51 @@ module simulation
    real(WP) :: maxTemp_dt ! maximum allowable temperature change per time step [K/timeStep]
    real(WP) :: T_dt_cur ! the current temperature-based max allowable timestep [sec]
 
+   type(fluidTable) :: lTab,gTab
+
 
    
 contains
    
-   
+   function xn_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (i.eq.pg%imin) isIn = .true.
+   end function xn_locator
+
+   function xp_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (i.eq.pg%imax+1) isIn = .true.
+   end function xp_locator
+
       !> Define here our equation of state - rho(T,mass)
    subroutine get_rho()
       implicit none
       ! real(WP), intent(in) :: mass
       integer :: i,j,k
-      real(WP) :: W_g,W_l,p0,R_cst
+      real(WP) :: W_g,W_l,R_cst
       R_cst = 8.314472_WP ! Gas constant [J/(kg*K)]
-      W_g = 0.0289_WP! Carrier gas molar weight [kg/mol]
-      W_l = 0.04607_WP! Drop molar weight [kg/mol]
-      p0 = 101325.0_WP! Ambient pressure [Pa]
+      W_g = gTab%MW ! Carrier gas molar weight [kg/mol]
+      W_l = lTab%MW ! Drop molar weight [kg/mol]
 
       ! Calculate density
       do k=T_sc%cfg%kmino_,T_sc%cfg%kmaxo_
          do j=T_sc%cfg%jmino_,T_sc%cfg%jmaxo_
             do i=T_sc%cfg%imino_,T_sc%cfg%imaxo_
-               T_sc%rho(i,j,k)=p0/(R_cst*(Yf_sc%SC(i,j,k)/W_l+(1.0_WP-Yf_sc%SC(i,j,k))/W_g)*T_sc%SC(i,j,k))
+               if (Yf_sc%SC(i,j,k).ge.0.0_WP) then
+                  T_sc%rho(i,j,k)=p0/(R_cst*(Yf_sc%SC(i,j,k)/W_l+(1.0_WP-Yf_sc%SC(i,j,k))/W_g)*T_sc%SC(i,j,k)) + lp%srcM(i,j,k)
+               else
+                  T_sc%rho(i,j,k)=p0*W_g/(R_cst*T_sc%SC(i,j,k)) + lp%srcM(i,j,k)
+               end if
                Yf_sc%rho(i,j,k)=T_sc%rho(i,j,k)
             end do
          end do
@@ -71,6 +97,7 @@ contains
 
    !> Initialization of problem solver
    subroutine simulation_init
+      use coolprop
       use param, only: param_read
       implicit none
       
@@ -83,21 +110,117 @@ contains
          time%itmax=2
       end block initialize_timetracker
       
+      initialize_fluid_properties: block
+         ! use messager, only : die
+         ! use fluidTable_class, only: mu_ID
+         integer :: i,j
+         real(WP) :: Tmin,Tmax,Pmin,Pmax,dP,dT
+         real(WP) :: testVal
 
+         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Liquid !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+         lTab%nP = 21
+         lTab%nT = 21
+         allocate(lTab%Cp(lTab%nT)); lTab%Cp = 0.0_WP
+         allocate(lTab%rho(lTab%nP,lTab%nT)); lTab%rho = 0.0_WP
+         allocate(lTab%L_v(lTab%nP)); lTab%L_v = 0.0_WP
+         allocate(lTab%T_b(lTab%nP)); lTab%T_b = 0.0_WP
+         allocate(lTab%T(lTab%nT)); lTab%T = 0.0_WP
+         allocate(lTab%P(lTab%nP)); lTab%P = 0.0_WP
+         allocate(lTab%mu(lTab%nP,lTab%nT)); lTab%mu = 0.0_WP
+
+         call param_read('Pressure',p0)
+         call param_read('Fuel',lTab%name)
+         call param_read('Gas inlet temperature',Tmax)
+
+         Pmin = p0/1.1_WP; Pmax = p0*1.1_WP
+         dP = (Pmax-Pmin)/(real(lTab%nP,WP)-1.0_WP)
+
+         Tmin = maxval([250.0_WP,1.01_WP*cprop(output='Tmin'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))]); 
+         Tmax = 0.99_WP*cprop(output='T'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))
+         dT = (Tmax-Tmin)/(real(lTab%nT,WP)-1.0_WP)
+
+         lTab%MW = cprop(output='M'//char(0),name1='T'//char(0),prop1=Tmin,name2='P'//char(0),prop2=p0,fluidname=trim(lTab%name)//char(0))
+
+         do i=1,lTab%nP
+            lTab%P(i) = Pmin+dP*(real(i,WP)-1.0_WP)
+            do j=1,lTab%nT
+               if (i.eq.1) then
+                  lTab%T(j) = Tmin+dT*(real(j,WP)-1.0_WP)
+                  lTab%Cp(j) = cprop(output='CPMASS'//char(0),name1='T'//char(0),prop1=lTab%T(j),name2='P'//char(0),prop2=p0,fluidname=trim(lTab%name)//char(0))
+               end if
+               lTab%rho(i,j) = cprop(output='D'//char(0),name1='T'//char(0),prop1=lTab%T(j),name2='P'//char(0),prop2=lTab%P(i),fluidname=trim(lTab%name)//char(0))
+               lTab%mu(i,j) = cprop(output='V'//char(0),name1='T'//char(0),prop1=lTab%T(j),name2='P'//char(0),prop2=lTab%P(i),fluidname=trim(lTab%name)//char(0))
+
+            end do
+            lTab%T_b(i) = cprop(output='T'//char(0),name1='P'//char(0),prop1=lTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))
+            lTab%L_v(i) = cprop(output='H'//char(0),name1='P'//char(0),prop1=lTab%P(i),name2='Q'//char(0),prop2=1.0_WP,fluidname=trim(lTab%name)//char(0)) - &
+                        cprop(output='H'//char(0),name1='P'//char(0),prop1=lTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0)) ! latent heat of vaporization
+         end do
+
+         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Gas !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+         gTab%nP = 11
+         gTab%nT = 11
+         allocate(gTab%Cp(gTab%nT)); gTab%Cp = 0.0_WP
+         allocate(gTab%rho(gTab%nP,gTab%nT)); gTab%rho = 0.0_WP
+         allocate(gTab%L_v(gTab%nP)); gTab%L_v = 0.0_WP
+         allocate(gTab%T_b(gTab%nP)); gTab%T_b = 0.0_WP
+         allocate(gTab%T(gTab%nT)); gTab%T = 0.0_WP
+         allocate(gTab%P(gTab%nP)); gTab%P = 0.0_WP
+         allocate(gTab%mu(gTab%nP,gTab%nT)); gTab%mu = 0.0_WP
+
+         call param_read('Pressure',p0)
+         call param_read('Gas',gTab%name)
+         call param_read('Gas inlet temperature',Tmax)
+         call param_read('Gas Prandtl number',gTab%Pr)
+         call param_read('Fuel-gas Schmidt number',gTab%Sc)
+         Pmin = p0/1.1_WP; Pmax = p0*1.1_WP
+         dP = (Pmax-Pmin)/(real(gTab%nP,WP)-1.0_WP)
+
+         Tmin = maxval([250.0_WP,1.01_WP*cprop(output='Tmin'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))])
+         Tmax = Tmax*1.5
+         dT = (Tmax-Tmin)/(real(gTab%nT,WP)-1.0_WP)
+
+         gTab%MW = cprop(output='M'//char(0),name1='T'//char(0),prop1=Tmin,name2='P'//char(0),prop2=p0,fluidname=trim(gTab%name)//char(0))
+
+         do i=1,gTab%nP
+            gTab%P(i) = Pmin+dP*(real(i,WP)-1.0_WP)
+            do j=1,gTab%nT
+               if (i.eq.1) then
+                  gTab%T(j) = Tmin+dT*(real(j,WP)-1.0_WP)
+                  gTab%Cp(j)= cprop(output='CPMASS'//char(0),name1='T'//char(0),prop1=gTab%T(j),name2='P'//char(0),prop2=p0,fluidname=trim(gTab%name)//char(0))
+               end if
+               gTab%rho(i,j)= cprop(output='D'//char(0),name1='T'//char(0),prop1=gTab%T(j),name2='P'//char(0),prop2=gTab%P(i),fluidname=trim(gTab%name)//char(0))
+               gTab%mu(i,j) = cprop(output='V'//char(0),name1='T'//char(0),prop1=gTab%T(j),name2='P'//char(0),prop2=gTab%P(i),fluidname=trim(gTab%name)//char(0))
+
+            end do
+            gTab%T_b(i) = cprop(output='T'//char(0),name1='P'//char(0),prop1=gTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(gTab%name)//char(0))
+            gTab%L_v(i) = cprop(output='H'//char(0),name1='P'//char(0),prop1=gTab%P(i),name2='Q'//char(0),prop2=1.0_WP,fluidname=trim(gTab%name)//char(0)) - &
+                          cprop(output='H'//char(0),name1='P'//char(0),prop1=gTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(gTab%name)//char(0)) ! latent heat of vaporization
+         end do
+         ! print*,'Tmin',Tmin,'Tmax',Tmax,'nT',lTab%nT,'Pmin',Pmin,'Pmax',Pmax,'nP',lTab%nP
+         ! print*,'max(mu)',maxval(gTab%mu),'min(mu)',minval(gTab%mu)
+         ! call gTab%evalProps(propOut=testVal,T_q=280.0_WP,P_q=p0,propID=mu_ID)
+         ! print*,'interped mu',testVal
+         ! call die('ending here')
+
+      end block initialize_fluid_properties
+   
       ! Initialize our LPT
       initialize_lpt: block
+         use fluidTable_class, only: rho_ID
          ! use random, only: random_uniform
          real(WP) :: dp,T_d
          real(WP),dimension(3) :: v_drop
          integer :: i
          ! Create solver
-         lp=lpt(cfg=cfg,name='LPT')
-         ! Get droplet density from the input
-         call param_read('Droplet density',lp%rho)
+         lp=lpt(cfg=cfg,name='LPT')         
          ! Get droplet diameter from the input
          call param_read('Droplet diameter',dp)
          ! Get droplet initial temperature
          call param_read('Droplet temperature',T_d)
+         ! Get droplet density from the fluid table
+         call lTab%evalProps(propOut=lp%rho,T_q=T_d,P_q=p0,propID=rho_ID)
          call param_read('Droplet velocity',v_drop)
          ! Set filter scale to 3.5*dx
          lp%filter_width=3.5_WP*cfg%min_meshsize
@@ -139,14 +262,6 @@ contains
          lp%Tcol=5.0_WP*time%dt
       end block initialize_lpt
       
-      
-      ! Test particle I/O
-      !test_lpt_io: block
-      !   ! Write it out
-      !   call lp%write(filename='part.file')
-      !   ! Read it back up
-      !   call lp%read(filename='part.file')
-      !end block test_lpt_io
 
       initialize_res: block
          allocate(resU (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
@@ -159,12 +274,41 @@ contains
          allocate(Wi   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       end block initialize_res
       
-      ! Prepare our fluid phase
+      ! Initialize scalar solvers
+      initialize_sc: block
+         use ils_class,      only: gmres
+         real(WP) :: diff_T,diff_Yf,T_in
+         ! create the scalar solvers for temperature and fuel mass fraction
+         T_sc=vdscalar(cfg=cfg,scheme=1,name='Temperature solver')
+         Yf_sc=vdscalar(cfg=cfg,scheme=1,name='Fuel mass fraction solver')
+         ! Configure implicit scalar solver
+         call param_read('Implicit iteration',T_sc%implicit%maxit)
+         call param_read('Implicit tolerance',T_sc%implicit%rcvg)
+         Yf_sc%implicit%maxit=T_sc%implicit%maxit; YF_sc%implicit%rcvg=T_sc%implicit%rcvg
+         ! Setup the solver
+         call T_sc%setup(implicit_ils=gmres)
+         call Yf_sc%setup(implicit_ils=gmres)
+         ! Set initial field values
+         call param_read('Gas inlet temperature',T_in)
+         T_sc%SC=T_in
+         Yf_sc%SC=0
+         call get_rho()
+         ! Set diffusivities
+         call param_read('Thermal diffusivity',diff_T)
+         call param_read('Fuel diffusivity',diff_Yf)
+         T_sc%diff = diff_T
+         Yf_sc%diff = diff_Yf
+         call param_read('Max temperature change',maxTemp_dt)
+      end block initialize_sc
+
+      ! Initialize the flow solver
       initialize_fs: block
          use mathtools, only: twoPi
+         use lowmach_class, only: clipped_neumann
          use ils_class, only: pcg_amg,pfmg
+         use fluidTable_class, only: mu_ID
          integer :: i,j,k
-         real(WP) :: rhof,viscf
+         real(WP) :: rhof,viscf,T_in,viscf2
          ! Allocate arrays
          ! allocate(rho (lp%cfg%imino_:lp%cfg%imaxo_,lp%cfg%jmino_:lp%cfg%jmaxo_,lp%cfg%kmino_:lp%cfg%kmaxo_))
          ! allocate(visc(lp%cfg%imino_:lp%cfg%imaxo_,lp%cfg%jmino_:lp%cfg%jmaxo_,lp%cfg%kmino_:lp%cfg%kmaxo_))
@@ -173,9 +317,14 @@ contains
          ! allocate(W(lp%cfg%imino_:lp%cfg%imaxo_,lp%cfg%jmino_:lp%cfg%jmaxo_,lp%cfg%kmino_:lp%cfg%kmaxo_))
 
          fs=lowmach(cfg=cfg,name='Variable density low Mach NS')
-         ! Set constant initial density, viscosity, temperature, fuel mass fraction
-         ! call param_read('Gas density',rhof);fs%rho = rhof
-         call param_read('Gas dynamic viscosity',viscf);fs%visc = viscf
+         ! Setup bconds
+         call fs%add_bcond(name='bc_xn',type=clipped_neumann,face='x',dir=-1,canCorrect=.true.,locator=xn_locator)
+         call fs%add_bcond(name='bc_xp',type=clipped_neumann,face='x',dir=+1,canCorrect=.true.,locator=xp_locator)
+
+         ! Set initial density, viscosity
+         fs%rho = Yf_sc%rho ! Take density from scalar solver
+         call param_read('Gas inlet temperature',T_in)
+         call gTab%evalProps(propOut=viscf,T_q=T_in,P_q=p0,propID=mu_ID); fs%visc=viscf
          ! Configure pressure solver
          call param_read('Pressure iteration',fs%psolv%maxit)
          call param_read('Pressure tolerance',fs%psolv%rcvg)
@@ -198,51 +347,6 @@ contains
          call fs%interp_vel(Ui,Vi,Wi)
       end block initialize_fs
 
-      ! Initialize scalar solvers
-      initialize_sc: block
-         use ils_class,      only: gmres
-         real(WP) :: diff_T,diff_Yf,T_in
-         ! create the scalar solvers for temperature and fuel mass fraction
-         T_sc=vdscalar(cfg=cfg,scheme=1,name='Temperature solver')
-         Yf_sc=vdscalar(cfg=cfg,scheme=1,name='Fuel mass fraction solver')
-         ! Use implicit iterations and tolerancing from flow solver
-         T_sc%implicit%maxit=fs%implicit%maxit; T_sc%implicit%rcvg=fs%implicit%rcvg
-         Yf_sc%implicit%maxit=fs%implicit%maxit; YF_sc%implicit%rcvg=fs%implicit%rcvg
-         ! Setup the solver
-         call T_sc%setup(implicit_ils=gmres)
-         call Yf_sc%setup(implicit_ils=gmres)
-
-
-         ! Set initial field values
-         call param_read('Gas inlet temperature',T_in)
-         T_sc%SC=T_in
-         Yf_sc%SC=0
-         call get_rho()
-         ! Set diffusivities
-         call param_read('Thermal diffusivity',diff_T)
-         call param_read('Fuel diffusivity',diff_Yf)
-         T_sc%diff = diff_T
-         Yf_sc%diff = diff_Yf
-         ! Set densities
-         fs%rho = Yf_sc%rho
-         call param_read('Max temperature change',maxTemp_dt)
-      end block initialize_sc
-
-      !> Set initial time step to prevent excessive initial temperature change in droplets
-      init_drop_times: block
-         use messager, only: die
-         integer :: i
-         real(WP) :: min_dt
-         real(WP) :: Tdot,Mdot,opt_dt,Bm_debug
-         real(WP),dimension(3) :: acc
-         min_dt = time%dt
-         do i=1,lp%np_
-            call lp%get_rhs(U=fs%U,V=fs%V,W=fs%W,rho=fs%rho,visc=fs%visc,T=T_sc%SC,Yf=Yf_sc%SC,p=lp%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=opt_dt,Bm_debug=Bm_debug)
-            if (opt_dt.lt.min_dt) min_dt = opt_dt
-         end do
-         time%dt = min_dt
-      end block init_drop_times
-
       ! Create partmesh object for Lagrangian particle output
       create_pmesh: block
          integer :: i
@@ -255,12 +359,22 @@ contains
             pmesh%var(2,i)=lp%p(i)%T_d ! Droplet Temperature
          end do
       end block create_pmesh
+      ! create_pmesh: block
+      !    integer :: i
+      !    pmesh=partmesh(nvar=1,name='lpt')
+      !    pmesh%varname(1)='radius'
+      !    call lp%update_partmesh(pmesh)
+      !    do i=1,lp%np_
+      !       pmesh%var(1,i)=0.5_WP*lp%p(i)%d
+      !    end do
+      ! end block create_pmesh
+
       
       
       ! Add Ensight output
       create_ensight: block
          ! Create Ensight output from cfg
-         ens_out=ensight(cfg=lp%cfg,name='particles')
+         ens_out=ensight(cfg=lp%cfg,name='evaporation')
          ! Create event for Ensight output
          ens_evt=event(time=time,name='Ensight output')
          call param_read('Ensight output period',ens_evt%tper)
@@ -275,8 +389,6 @@ contains
          ! Output to ensight
          if (ens_evt%occurs()) call ens_out%write_data(time%t)
       end block create_ensight
-      
-      
       ! Create a monitor file
       create_monitor: block
          ! Prepare some info about fields
@@ -346,7 +458,7 @@ contains
          ! Increment time         
          call fs%get_cfl(time%dt,time%cfl)
          call time%adjust_dt()
-         ! if (time%dt.gt.T_dt_cur) time%dt = T_dt_cur
+         ! if (time%dt.gt.T_dt_cur) time%dt = T_dt_cur ! modify dt given temperature change on mesh
          call time%increment()
          ! print*,'New dt:',time%dt
 
@@ -388,12 +500,14 @@ contains
             
             ! Add mass, energy source terms
             add_mass_energy_src: block
+               use fluidTable_class, only: Cp_ID
                integer :: i,j,k
-               real(WP) :: Cp_g = 1200.0_WP
+               real(WP) :: Cp_g
                do k=fs%cfg%kmin_,fs%cfg%kmax_
                   do j=fs%cfg%jmin_,fs%cfg%jmax_
                      do i=fs%cfg%imin_,fs%cfg%imax_
                         ! Need in SC*kg/m^3
+                        call gTab%evalProps(propOut=Cp_g,T_q=T_sc%SC(i,j,k),P_q=p0,propID=Cp_ID)
                         resT(i,j,k)=resT(i,j,k)+lp%srcE(i,j,k)/Cp_g!/cfg%vol(i,j,k)
                         resYf(i,j,k)=resYf(i,j,k)+lp%srcM(i,j,k)!/cfg%vol(i,j,k) ! *Yf_sc%rho(i,j,k)
                      end do
@@ -409,16 +523,16 @@ contains
             T_sc%SC=2.0_WP*T_sc%SC-T_sc%SCold+resT
             Yf_sc%SC=2.0_WP*Yf_sc%SC-Yf_sc%SCold+resYf
 
-            clip_Yf: block
-               integer :: i,j,k
-               do k=fs%cfg%kmin_,fs%cfg%kmax_
-                  do j=fs%cfg%jmin_,fs%cfg%jmax_
-                     do i=fs%cfg%imin_,fs%cfg%imax_
-                        if (Yf_sc%SC(i,j,k).lt.0.0_WP) Yf_sc%SC(i,j,k) = 0.0_WP
-                     end do
-                  end do
-               end do
-            end block clip_Yf
+            ! clip_Yf: block
+            !    integer :: i,j,k
+            !    do k=fs%cfg%kmin_,fs%cfg%kmax_
+            !       do j=fs%cfg%jmin_,fs%cfg%jmax_
+            !          do i=fs%cfg%imin_,fs%cfg%imax_
+            !             if (Yf_sc%SC(i,j,k).lt.0.0_WP) Yf_sc%SC(i,j,k) = 0.0_WP
+            !          end do
+            !       end do
+            !    end do
+            ! end block clip_Yf
 
             ! print*,'max rho2',maxval(Yf_sc%rho)
             
@@ -427,8 +541,6 @@ contains
             call Yf_sc%apply_bcond(time%t,time%dt)
             ! print*,'here0C',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! print*,'max rho3',maxval(Yf_sc%rho)
-            ! print*,'max Yf',maxval(Yf_sc%SC)
-            ! print*,'max T',maxval(T_sc%SC)
             ! ===================================================
             
             ! ============ UPDATE PROPERTIES ====================
@@ -437,11 +549,28 @@ contains
             resYf=Yf_sc%rho*Yf_sc%SC
 
             ! Update density
-            ! call get_rho()
+            call get_rho()
+            T_sc%rho = T_sc%rho+lp%srcM
+            Yf_sc%rho = Yf_sc%rho+lp%srcM
             ! print*,'here0D',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Rescale scalar for conservation
-            !sc%SC=resSC/sc%rho
+            ! T_sc%SC=resT/T_sc%rho
+            ! Yf_sc%SC=resYf/Yf_sc%rho
+
             ! UPDATE THE VISCOSITY
+            update_visc: block
+               use fluidTable_class, only: mu_ID
+               integer :: i,j,k
+
+               do k=fs%cfg%kmin_,fs%cfg%kmax_
+                  do j=fs%cfg%jmin_,fs%cfg%jmax_
+                     do i=fs%cfg%imin_,fs%cfg%imax_
+                        call gTab%evalProps(propOut=fs%visc(i,j,k),T_q=T_sc%SC(i,j,k),P_q=p0,propID=mu_ID)
+                        
+                     end do
+                  end do
+               end do
+            end block update_visc
             ! UPDATE THE DIFFUSIVITY
             ! ===================================================
             
@@ -494,11 +623,10 @@ contains
             ! This is where dirichlet BCs would go
 
             ! Solve Poisson equation
-            ! call T_sc%get_drhodt(dt=time%dt,drhodt=resT)
             call Yf_sc%get_drhodt(dt=time%dt,drhodt=resYf)
-            call fs%correct_mfr(drhodt=resYf)
-            call fs%get_div(drhodt=resYf)
-            fs%psolv%rhs=-fs%cfg%vol*fs%div/time%dtmid + fs%cfg%vol*lp%srcM/time%dtmid
+            call fs%correct_mfr(drhodt=(resYf + fs%cfg%vol*lp%srcM/time%dtmid))
+            call fs%get_div(drhodt=(resYf + fs%cfg%vol*lp%srcM/time%dtmid))
+            fs%psolv%rhs=-fs%cfg%vol*fs%div/time%dtmid
             fs%psolv%sol=0.0_WP
             call fs%psolv%solve()
             call fs%shift_p(fs%psolv%sol)
@@ -523,33 +651,34 @@ contains
          ! print*,'here1'
          ! Advance particles by dt
          ! print*,'U=',maxval(fs%U),'V=',maxval(fs%V),'W=',maxval(fs%W),'rho=',maxval(fs%rho),'visc=',maxval(fs%visc),'T=',maxval(T_sc%SC),'Yf=',maxval(Yf_sc%SC)
-         call lp%advance(dt=time%dt,U=fs%U,V=fs%V,W=fs%W,rho=fs%rho,visc=fs%visc,T=T_sc%SC,Yf=Yf_sc%SC,Bm_debug=Bm_debug)
+         call lp%advance(dt=time%dt,U=fs%U,V=fs%V,W=fs%W,rho=fs%rho,visc=fs%visc,T=T_sc%SC,Yf=Yf_sc%SC,Bm_debug=Bm_debug,lTab=lTab,gTab=gTab,p_therm=p0)
+         ! print*,'max(srcM)',maxval(lp%srcM),'max(srcE)',maxval(lp%srcE)
          ! Use new source terms to determine if need to reduce next time step
-         if (maxval(abs(lp%srcE)).gt.(0.0_WP)) then
-            temp_dt_control: block
-               real(WP) :: Cp_g = 1200.0_WP
-               real(WP) :: dT_cur ! maximum temperature increase per time step across mesh
-               dT_cur = maxval(T_sc%SC-T_sc%SCold)
-               ! dT_cur = maxval(abs(lp%srcE/(fs%rho*Cp_g))) ! [K/timeStep]
-               if (abs(dT_cur).gt.abs(maxTemp_dt)) T_dt_cur = time%dt*abs(maxTemp_dt/dT_cur)
-               ! print*,'dT_cur [K]',abs(dT_cur),'T_dt_cur [s]',T_dt_cur
-            end block temp_dt_control
-         end if
-         ! print*,'here2'
-         if (lp%np.eq.0) amDone=.true.
-         ! Output to ensight
-         ! if (ens_evt%occurs()) then
-         !    ensight_output: block
-         !       integer :: i
-         !       call lp%update_partmesh(pmesh)
-         !       do i = 1,lp%np_
-         !          pmesh%var(1,i)=0.5_WP*lp%p(i)%d ! Droplet Radius
-         !          pmesh%var(2,i)=lp%p(i)%T_d ! Droplet Temperature
-         !       end do
-      
-         !       call ens_out%write_data(time%t)
-         !       end block ensight_output
+         ! if (maxval(abs(lp%srcE)).gt.(0.0_WP)) then
+         !    temp_dt_control: block
+         !       real(WP) :: Cp_g = 1200.0_WP
+         !       real(WP) :: dT_cur ! maximum temperature increase per time step across mesh
+         !       dT_cur = maxval(T_sc%SC-T_sc%SCold)
+         !       ! dT_cur = maxval(abs(lp%srcE/(fs%rho*Cp_g))) ! [K/timeStep]
+         !       if (abs(dT_cur).gt.abs(maxTemp_dt)) T_dt_cur = time%dt*abs(maxTemp_dt/dT_cur)
+         !       ! print*,'dT_cur [K]',abs(dT_cur),'T_dt_cur [s]',T_dt_cur
+         !    end block temp_dt_control
          ! end if
+         ! print*,'here2'
+         if ((lp%np.eq.0)) amDone=.true.
+         ! Output to ensight
+         if (ens_evt%occurs()) then
+            ensight_output: block
+               integer :: i
+               call lp%update_partmesh(pmesh)
+               do i = 1,lp%np_
+                  pmesh%var(1,i)=0.5_WP*lp%p(i)%d ! Droplet Radius
+                  pmesh%var(2,i)=lp%p(i)%T_d ! Droplet Temperature
+               end do
+      
+               call ens_out%write_data(time%t)
+               end block ensight_output
+         end if
          ! print*,'here3'
          ! Perform and output monitoring
          call lp%get_max()

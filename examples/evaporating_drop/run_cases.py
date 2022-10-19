@@ -30,7 +30,7 @@ import re
 n = 41
 temps = np.linspace(300,700,n)
 
-testSeries = 'C' # identified for series of cases
+testSeries = 'F' # identified for series of cases
 
 for i in range(n):
     print(f'Running simulation #{i}')
