@@ -86,6 +86,7 @@ module lpt_class
       real(WP) :: Umin,Umax,Umean,Uvar                    !< U velocity info
       real(WP) :: Vmin,Vmax,Vmean,Vvar                    !< V velocity info
       real(WP) :: Wmin,Wmax,Wmean,Wvar                    !< W velocity info
+      real(WP) :: Tmean,Tvar                              !< Temperature info
       integer  :: np_new,np_out                           !< Number of new and removed particles
       
       ! Particle volume fraction
@@ -522,6 +523,7 @@ contains
       ! Advance the equations
       do i=1,this%np_
          ! Time-integrate until dt_done=dt
+         ! if (this%cfg%rank.eq.0) print*,'here0',i
          dt_done=0.0_WP
          notEvap = .true.
          dm = 0.0_WP
@@ -547,16 +549,18 @@ contains
             ! Advance energy transfer
             this%p(i)%T_d = pold%T_d + 0.5_WP*mydt*Tdot
             TdotMid = Tdot
+            !   if (this%cfg%rank.eq.0) print*,'here1',i
             ! Correct with midpoint rule
             call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=this%p(i)%dt,&
                Bm_debug=Bm_debug,lTab=lTab,gTab=gTab,p_therm=p_therm)
+            !   if (this%cfg%rank.eq.0) print*,'here2',i
             ! Advance pos, vel
             this%p(i)%pos=pold%pos+mydt*this%p(i)%vel
             this%p(i)%vel=pold%vel+mydt*(acc+this%gravity+this%p(i)%col)
             ! Advance mass loss 2nd half
             m_d = m_old+mydt*Mdot
             dm = m_d-m_old;
-
+            !   if (this%cfg%rank.eq.0) print*,'here3',i
             this%p(i)%d = (6.0_WP*m_d/(Pi*this%rho))**(1.0_WP/3.0_WP)! translate new mass to new diameter
             ! Advance energy transfer 2nd half
             this%p(i)%T_d = pold%T_d + mydt*Tdot
@@ -577,7 +581,7 @@ contains
                end if
                   ! print*,'np checkpoint 1',this%np
             end block calc_sourceE
-
+            !   if (this%cfg%rank.eq.0) print*,'here4',i
             ! Relocalize
             this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
             ! Send source term back to the mesh
@@ -591,6 +595,7 @@ contains
             ! print*,'np checkpoint 3',this%np
             ! Increment
             dt_done=dt_done+mydt
+            !   if (this%cfg%rank.eq.0) print*,'here5',i
          end do
          ! print*,'np checkpoint 4',this%np
          ! Correct the position to take into account periodicity
@@ -605,11 +610,12 @@ contains
          ! print*,'np checkpoint 6',this%np
          ! Relocalize the particle
          this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
+         !   if (this%cfg%rank.eq.0) print*,'here6',i
       end do
       ! print*,'np checkpoint 7',this%np
       ! Communicate particles
       call this%sync()
-      
+      !   if (this%cfg%rank.eq.0) print*,'here7'
       ! Divide source arrays by volume, sum at boundaries, and volume filter
       this%srcU=this%srcU/this%cfg%vol; call this%cfg%syncsum(this%srcU); call this%filter(this%srcU)
       this%srcV=this%srcV/this%cfg%vol; call this%cfg%syncsum(this%srcV); call this%filter(this%srcV)
@@ -662,6 +668,7 @@ contains
       real(WP) :: fvisc,frho,pVF,fVF
       real(WP), dimension(3) :: fvel
       real(WP),optional :: Bm_debug
+      ! if (this%cfg%rank.eq.0) print*,'RHS0'
       ! Interpolate the fluid phase velocity to the particle location
       fvel=this%cfg%get_velocity(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),U=U,V=V,W=W)
       ! Interpolate the fluid phase viscosity to the particle location
@@ -672,22 +679,29 @@ contains
       ! print*,'frho:',frho
       ! Interpolate the particle volume fraction to the particle location
       pVF=this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=this%VF,bc='n')
+      if (pVF.lt.0.0_WP) pVF=0.0_WP
       fVF=1.0_WP-pVF
       ! Particle Reynolds number
       Re=frho*norm2(p%vel-fvel)*p%d/fvisc+epsilon(1.0_WP)
+      ! if (this%cfg%rank.eq.0) print*,'pVf:',pVF,'fVf:',fVf
+      ! if (this%cfg%rank.eq.0) print*,'RHS1'
       ! Stokes correlation
       !corr=1.0_WP
       ! Schiller Naumann correlation
       !corr=1.0_WP+0.15_WP*Re**(0.687_WP)
       ! Tenneti and Subramaniam (2011)
       b1=5.81_WP*pVF/fVF**3+0.48_WP*pVF**(1.0_WP/3.0_WP)/fVF**4
+      ! if (this%cfg%rank.eq.0) print*,'RHS1a'
       b2=pVF**3*Re*(0.95_WP+0.61_WP*pVF**3/fVF**2)
+      ! if (this%cfg%rank.eq.0) print*,'RHS1b'
       corr=fVF*(1.0_WP+0.15_WP*Re**(0.687_WP))/fVF**3+b1+b2
+      ! if (this%cfg%rank.eq.0) print*,'RHS1c'
       ! Particle response time
       tau=this%rho*p%d**2/(18.0_WP*fvisc*corr)
+      ! if (this%cfg%rank.eq.0) print*,'RHS1d'
       ! Return acceleration
       acc=fVF*(fvel-p%vel)/tau
-
+      ! if (this%cfg%rank.eq.0) print*,'RHS2'
       evaporate_rhs : block
          use fluidTable_class, only: Cp_ID,Lv_ID,Tb_ID
          real(WP) :: Lv,W_g,W_l,R_cst,T_b,Cp_g,Cp_l ! Fluid properties
@@ -733,7 +747,7 @@ contains
          m_d = (this%rho*Pi*p%d**3.0_WP)/6.0_WP
          Mdot = -Sh_g*m_d*log(1.0_WP+Bm)/(3.0_WP*Sc_g*tau)
          ! print*,'Mdot:',Mdot
-
+         ! if (this%cfg%rank.eq.0) print*,'RHS3'
          ! Energy transfer
          beta = (-3.0_WP*Pr_g*tau/2.0_WP*Mdot/m_d)
          f2 = beta/(exp(beta)-1.0_WP)
@@ -776,6 +790,7 @@ contains
          if (.not.((tau_T.ge.0.0_WP).or.(tau_T.lt.0.0_WP))) call die('NaN time constant')
          ! if (tau_T.le.1.0_WP) call die('NaN time constant')
          ! print*,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
+         ! if (this%cfg%rank.eq.0) print*,'RHS4'
       end block evaporate_rhs
 
    end subroutine get_rhs
@@ -874,11 +889,13 @@ contains
       this%Umin=huge(1.0_WP); this%Umax=-huge(1.0_WP); this%Umean=0.0_WP
       this%Vmin=huge(1.0_WP); this%Vmax=-huge(1.0_WP); this%Vmean=0.0_WP
       this%Wmin=huge(1.0_WP); this%Wmax=-huge(1.0_WP); this%Wmean=0.0_WP
+      this%Tmean=0.0_WP
       do i=1,this%np_
          this%dmin=min(this%dmin,this%p(i)%d     ); this%dmax=max(this%dmax,this%p(i)%d     ); this%dmean=this%dmean+this%p(i)%d
          this%Umin=min(this%Umin,this%p(i)%vel(1)); this%Umax=max(this%Umax,this%p(i)%vel(1)); this%Umean=this%Umean+this%p(i)%vel(1)
          this%Vmin=min(this%Vmin,this%p(i)%vel(2)); this%Vmax=max(this%Vmax,this%p(i)%vel(2)); this%Vmean=this%Vmean+this%p(i)%vel(2)
          this%Wmin=min(this%Wmin,this%p(i)%vel(3)); this%Wmax=max(this%Wmax,this%p(i)%vel(3)); this%Wmean=this%Wmean+this%p(i)%vel(3)
+         this%Tmean=this%Tmean+this%p(i)%T_d
       end do
       call MPI_ALLREDUCE(this%dmin ,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%dmin =buf
       call MPI_ALLREDUCE(this%dmax ,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%dmax =buf
@@ -892,23 +909,28 @@ contains
       call MPI_ALLREDUCE(this%Wmin ,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%Wmin =buf
       call MPI_ALLREDUCE(this%Wmax ,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%Wmax =buf
       call MPI_ALLREDUCE(this%Wmean,buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%Wmean=buf/safe_np
+      call MPI_ALLREDUCE(this%Tmean,buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%Tmean=buf/safe_np
+
       
       ! Diameter and velocity variance
       this%dvar=0.0_WP
       this%Uvar=0.0_WP
       this%Vvar=0.0_WP
       this%Wvar=0.0_WP
+      this%Tvar=0.0_WP
       do i=1,this%np_
          this%dvar=this%dvar+(this%p(i)%d     -this%dmean)**2.0_WP
          this%Uvar=this%Uvar+(this%p(i)%vel(1)-this%Umean)**2.0_WP
          this%Vvar=this%Vvar+(this%p(i)%vel(2)-this%Vmean)**2.0_WP
          this%Wvar=this%Wvar+(this%p(i)%vel(3)-this%Wmean)**2.0_WP
+         this%Tvar=this%Tvar+(this%p(i)%T_d   -this%Tmean)**2.0_WP
       end do
       call MPI_ALLREDUCE(this%dvar,buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%dvar=buf/safe_np
       call MPI_ALLREDUCE(this%Uvar,buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%Uvar=buf/safe_np
       call MPI_ALLREDUCE(this%Vvar,buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%Vvar=buf/safe_np
       call MPI_ALLREDUCE(this%Wvar,buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%Wvar=buf/safe_np
-      
+      call MPI_ALLREDUCE(this%Tvar,buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%Tvar=buf/safe_np
+
       ! Get mean, max, and min volume fraction
       this%VFmean=0.0_WP
       this%VFmax =-huge(1.0_WP)
