@@ -11,13 +11,15 @@ module simulation
    use event_class,       only: event
    use monitor_class,     only: monitor
    use fluidTable_class,  only: fluidTable
+   use sgsmodel_class,    only: sgsmodel
    implicit none
    private
    
-   !> Get a LPT solver, lowmach solver, and corresponding time tracker
+   !> Get a LPT solver, lowmach solver, scalar solver, LES model, and corresponding time tracker
    type(lpt),         public :: lp
    type(lowmach),     public :: fs
    type(vdscalar),    public :: T_sc, Yf_sc
+   type(sgsmodel),    public :: sgs
    type(timetracker), public :: time
    
    !> Ensight postprocessing
@@ -37,13 +39,16 @@ module simulation
    real(WP), dimension(:,:,:), allocatable :: U,V,W,T,Yf
    ! real(WP), dimension(:,:,:), allocatable :: rho,visc
    real(WP) :: p0 ! ambient pressure
+   real(WP) :: diff_T,diff_Yf ! non-turbulent diffusivities for scalar solvers
 
    !> Case quantities
-   real(WP) :: dp,dp_sig,rp,rp_sig,u_inj,u_inj_sig,T_d
+   real(WP) :: dp,dp_sig,rp,rp_sig,u_inj,u_inj_sig,T_d,inj_rate,r_injG,v_injG,T_inj
+   integer :: nInj
 
    !> Quantities for flow & scalar solvers:
-   real(WP), dimension(:,:,:), allocatable :: resU,resV,resW,resT,resYf
-   real(WP), dimension(:,:,:), allocatable :: Ui,Vi,Wi
+   real(WP), dimension(:,:,:),   allocatable :: resU,resV,resW,resT,resYf
+   real(WP), dimension(:,:,:),   allocatable :: Ui,Vi,Wi
+   real(WP), dimension(:,:,:,:), allocatable :: SR
    real(WP) :: maxTemp_dt ! maximum allowable temperature change per time step [K/timeStep]
    real(WP) :: T_dt_cur ! the current temperature-based max allowable timestep [sec]
 
@@ -53,15 +58,15 @@ module simulation
    
 contains
    
-   function xn_locator(pg,i,j,k) result(isIn)
-      use pgrid_class, only: pgrid
-      implicit none
-      class(pgrid), intent(in) :: pg
-      integer, intent(in) :: i,j,k
-      logical :: isIn
-      isIn = .false.
-      if (i.eq.pg%imin) isIn = .true.
-   end function xn_locator
+   ! function xm_locator(pg,i,j,k) result(isIn)
+   !    use pgrid_class, only: pgrid
+   !    implicit none
+   !    class(pgrid), intent(in) :: pg
+   !    integer, intent(in) :: i,j,k
+   !    logical :: isIn
+   !    isIn = .false.
+   !    if (i.eq.pg%imin) isIn = .true.
+   ! end function xm_locator
 
    function xp_locator(pg,i,j,k) result(isIn)
       use pgrid_class, only: pgrid
@@ -72,6 +77,67 @@ contains
       isIn = .false.
       if (i.eq.pg%imax+1) isIn = .true.
    end function xp_locator
+
+   function xp_sc_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (i.eq.pg%imax) isIn = .true.
+   end function xp_sc_locator
+
+   function ym_sc_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (j.eq.pg%jmin) isIn = .true.
+   end function ym_sc_locator
+
+   function yp_sc_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (j.eq.pg%jmax) isIn = .true.
+   end function yp_sc_locator
+
+   function zm_sc_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (k.eq.pg%kmin) isIn = .true.
+   end function zm_sc_locator
+
+   function zp_sc_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (k.eq.pg%kmax) isIn = .true.
+   end function zp_sc_locator
+   
+
+   function gas_inj_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (i.eq.pg%imin.and.(sqrt(pg%ym(j)**2+pg%zm(k)**2)).le.r_injG) isIn = .true.
+   end function gas_inj_locator
 
       !> Define here our equation of state - rho(T,mass)
    subroutine get_rho()
@@ -109,6 +175,7 @@ contains
       initialize_timetracker: block
          time=timetracker(amRoot=cfg%amRoot)
          call param_read('Max timestep size',time%dtmax)
+         call param_read('Max cfl number',time%cflmax)
          time%dt=time%dtmax
          time%itmax=2
       end block initialize_timetracker
@@ -133,7 +200,7 @@ contains
 
          call param_read('Pressure',p0)
          call param_read('Fuel',lTab%name)
-         call param_read('Gas inlet temperature',Tmax)
+         call param_read('Gas inlet temperature',T_inj);Tmax = T_inj
 
          Pmin = p0/1.1_WP; Pmax = p0*1.1_WP
          dP = (Pmax-Pmin)/(real(lTab%nP,WP)-1.0_WP)
@@ -212,9 +279,10 @@ contains
       ! Initialize our LPT
       initialize_lpt: block
          use fluidTable_class, only: rho_ID
-         ! use random, only: random_uniform
-         real(WP),dimension(3) :: v_drop
-         integer :: i
+         use mathtools, only: twoPi
+         use random, only: random_normal,random_uniform
+         real(WP) :: theta
+         integer :: i,np
          ! Create solver
          lp=lpt(cfg=cfg,name='LPT')         
          ! Get droplet diameter from the input
@@ -224,41 +292,62 @@ contains
          call param_read('Injection radius standard deviation',rp_sig)
          call param_read('Injection mean velocity',u_inj)
          call param_read('Injection velocity standard deviation',u_inj_sig)
+         call param_read('Injection rate',inj_rate)
+         call param_read('Gas inlet radius',r_injG)
+         call param_read('Gas inlet velocity',v_injG)
          ! Get droplet initial temperature
          call param_read('Droplet temperature',T_d)
          ! Get droplet density from the fluid table
          call lTab%evalProps(propOut=lp%rho,T_q=T_d,P_q=p0,propID=rho_ID)
-         call param_read('Droplet velocity',v_drop)
          ! Set filter scale to 3.5*dx
          lp%filter_width=3.5_WP*cfg%min_meshsize
+         np = 0!int(floor(inj_rate*time%dt))
+         nInj = np
          ! Root process initializes 1000 particles randomly
          if (lp%cfg%amRoot) then
-            call lp%resize(1)
-            do i=1,1
+            call lp%resize(np)
+            do i=1,np
                ! Give id
                lp%p(i)%id=int(i,8)
-               ! Set the diameter
-               lp%p(i)%d=dp
+               lp%p(i)%d=random_normal(dp,dp_sig)
+               
                ! Set the temperature 
                lp%p(i)%T_d = T_d
-               !! Assign random position in the domain
-               ! lp%p(i)%pos=[random_uniform(lp%cfg%x(lp%cfg%imin),lp%cfg%x(lp%cfg%imax+1)),&
-               ! &            random_uniform(lp%cfg%y(lp%cfg%jmin),lp%cfg%y(lp%cfg%jmax+1)),&
-               ! &            random_uniform(lp%cfg%z(lp%cfg%kmin),lp%cfg%z(lp%cfg%kmax+1))]
-               ! lp%p(i)%pos(3)=lp%cfg%zm(lp%cfg%kmin)
-
                ! Assign position in center of domain
-               lp%p(i)%pos = 0.0_WP
+               theta = random_uniform(0.0_WP,twoPi)
+               lp%p(i)%pos = random_normal(rp,rp_sig)*[0.0_WP,cos(theta),sin(theta)]
                ! Give zero velocity
-               lp%p(i)%vel=v_drop![10.0_WP,0.0_WP,0.0_WP]
+               lp%p(i)%vel=[random_normal(u_inj,u_inj_sig),0.0_WP,0.0_WP]
                ! Give zero collision force
                lp%p(i)%col=0.0_WP
                ! Give zero dt
                lp%p(i)%dt=0.0_WP
+               ! if (i.eq.1) then
+               !    lp%p(i)%d = 2.4704001405660784E-004
+               !    lp%p(i)%pos = [0.0000000000000000,       -2.5057900298212500E-003 , -8.8511620133036768E-003]
+               !    lp%p(i)%vel = [0.81273492866603236     ,   0.0000000000000000       , 0.0000000000000000]
+               ! elseif (i.eq.2) then
+               !    lp%p(i)%d = 2.0199219697419638E-004
+               !    lp%p(i)%pos = [0.0000000000000000    ,   -1.0154472519830666E-002 ,  1.0500421707848354E-003]
+               !    lp%p(i)%vel = [1.1148285492011927    ,    0.0000000000000000      ,  0.0000000000000000]
+               ! elseif (i.eq.3) then
+               !    lp%p(i)%d = 2.6029391665542727E-004
+               !    lp%p(i)%pos = [0.0000000000000000     ,  -9.5741996916244992E-003 ,  3.8389814087694298E-003]
+               !    lp%p(i)%vel = [1.1806005033729705     ,   0.0000000000000000     ,   0.0000000000000000]
+               ! elseif (i.eq.4) then
+               !    lp%p(i)%d = 2.0646233157924451E-004
+               !    lp%p(i)%pos = [0.0000000000000000     ,   9.4279533991131724E-003  ,-3.7002057926788005E-003]
+               !    lp%p(i)%vel = [1.1209916291232243     ,   0.0000000000000000       , 0.0000000000000000]
+               ! elseif (i.eq.5) then
+               !    lp%p(i)%d = 2.6233197961856962E-004
+               !    lp%p(i)%pos = [0.0000000000000000   ,     4.9556122929777496E-003  ,-6.6845138838293712E-003]
+               !    lp%p(i)%vel = [1.0090102894034672   ,     0.0000000000000000     ,   0.0000000000000000]
+               ! end if
                ! Locate the particle on the mesh
                lp%p(i)%ind=lp%cfg%get_ijk_global(lp%p(i)%pos,[lp%cfg%imin,lp%cfg%jmin,lp%cfg%kmin])
                ! Activate the particle
                lp%p(i)%flag=0
+               ! print*,'ID:',lp%p(i)%id,'d',lp%p(i)%d,'pos',lp%p(i)%pos,'vel',lp%p(i)%vel
             end do
          end if
          ! Distribute particles
@@ -279,12 +368,14 @@ contains
          allocate(Ui   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
          allocate(Vi   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
          allocate(Wi   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+         allocate(SR (6,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       end block initialize_res
       
       ! Initialize scalar solvers
       initialize_sc: block
          use ils_class,      only: gmres
-         real(WP) :: diff_T,diff_Yf,T_in
+         use vdscalar_class, only: neumann,dirichlet
+         real(WP) :: T_in
          ! create the scalar solvers for temperature and fuel mass fraction
          T_sc=vdscalar(cfg=cfg,scheme=1,name='Temperature solver')
          Yf_sc=vdscalar(cfg=cfg,scheme=1,name='Fuel mass fraction solver')
@@ -292,13 +383,31 @@ contains
          call param_read('Implicit iteration',T_sc%implicit%maxit)
          call param_read('Implicit tolerance',T_sc%implicit%rcvg)
          Yf_sc%implicit%maxit=T_sc%implicit%maxit; YF_sc%implicit%rcvg=T_sc%implicit%rcvg
+         ! Create bconds
+         ! call T_sc%add_bcond(name='bc_xm',type=neumann,dir='xm',locator=xm_locator)
+         ! call T_sc%add_bcond(name='chop_out',type=dirichlet,dir='xp',locator=xp_sc_locator)
+         call T_sc%add_bcond(name='T_out',type=neumann,  dir='xp',locator=xp_sc_locator)
+         call T_sc%add_bcond(name='T_ym', type=neumann,  dir='ym',locator=ym_sc_locator)
+         call T_sc%add_bcond(name='T_yp', type=neumann,  dir='yp',locator=yp_sc_locator)
+         call T_sc%add_bcond(name='T_zm', type=neumann,  dir='zm',locator=zm_sc_locator)
+         call T_sc%add_bcond(name='T_zp', type=neumann,  dir='zp',locator=zp_sc_locator)
+         call T_sc%add_bcond(name='gas_inj', type=dirichlet,dir='xm',locator=gas_inj_locator)
+         call Yf_sc%add_bcond(name='Yf_out', type=neumann, dir='xp',locator=xp_sc_locator)
+         call Yf_sc%add_bcond(name='Yf_ym', type=neumann,  dir='ym',locator=ym_sc_locator)
+         call Yf_sc%add_bcond(name='Yf_yp', type=neumann,  dir='yp',locator=yp_sc_locator)
+         call Yf_sc%add_bcond(name='Yf_zm', type=neumann,  dir='zm',locator=zm_sc_locator)
+         call Yf_sc%add_bcond(name='Yf_zp', type=neumann,  dir='zp',locator=zp_sc_locator)
+         call Yf_sc%add_bcond(name='gas_inj',type=dirichlet,dir='xm',locator=gas_inj_locator)
+         ! call Yf_sc%add_bcond(name='chop_out',type=dirichlet,dir='xp',locator=xp_sc_locator)
+         ! call Yf_sc%add_bcond(name='bc_xm', type=neumann,  dir='xm',locator=xm_locator)
+
          ! Setup the solver
          call T_sc%setup(implicit_ils=gmres)
          call Yf_sc%setup(implicit_ils=gmres)
          ! Set initial field values
          call param_read('Gas inlet temperature',T_in)
          T_sc%SC=T_in
-         Yf_sc%SC=0
+         Yf_sc%SC=0.0_WP
          call get_rho()
          ! Set diffusivities
          call param_read('Thermal diffusivity',diff_T)
@@ -311,23 +420,17 @@ contains
       ! Initialize the flow solver
       initialize_fs: block
          use mathtools, only: twoPi
-         use lowmach_class, only: clipped_neumann
+         use lowmach_class, only: clipped_neumann,dirichlet,bcond
          use ils_class, only: pcg_amg,pfmg
          use fluidTable_class, only: mu_ID
-         integer :: i,j,k
+         type(bcond),pointer :: mybc
+         integer :: i,j,k,n
          real(WP) :: rhof,viscf,T_in,viscf2
-         ! Allocate arrays
-         ! allocate(rho (lp%cfg%imino_:lp%cfg%imaxo_,lp%cfg%jmino_:lp%cfg%jmaxo_,lp%cfg%kmino_:lp%cfg%kmaxo_))
-         ! allocate(visc(lp%cfg%imino_:lp%cfg%imaxo_,lp%cfg%jmino_:lp%cfg%jmaxo_,lp%cfg%kmino_:lp%cfg%kmaxo_))
-         ! allocate(U(lp%cfg%imino_:lp%cfg%imaxo_,lp%cfg%jmino_:lp%cfg%jmaxo_,lp%cfg%kmino_:lp%cfg%kmaxo_))
-         ! allocate(V(lp%cfg%imino_:lp%cfg%imaxo_,lp%cfg%jmino_:lp%cfg%jmaxo_,lp%cfg%kmino_:lp%cfg%kmaxo_))
-         ! allocate(W(lp%cfg%imino_:lp%cfg%imaxo_,lp%cfg%jmino_:lp%cfg%jmaxo_,lp%cfg%kmino_:lp%cfg%kmaxo_))
-
          fs=lowmach(cfg=cfg,name='Variable density low Mach NS')
          ! Setup bconds
-         call fs%add_bcond(name='bc_xn',type=clipped_neumann,face='x',dir=-1,canCorrect=.true.,locator=xn_locator)
+         ! call fs%add_bcond(name='bc_xm',type=neumann,face='x',dir=-1,caanCorrect=.true.,locator=xm_locator)
          call fs%add_bcond(name='bc_xp',type=clipped_neumann,face='x',dir=+1,canCorrect=.true.,locator=xp_locator)
-
+         call fs%add_bcond(name='gas_inj',type=dirichlet,face='x',dir=-1,canCorrect=.false.,locator=gas_inj_locator)
          ! Set initial density, viscosity
          fs%rho = Yf_sc%rho ! Take density from scalar solver
          call param_read('Gas inlet temperature',T_in)
@@ -345,14 +448,31 @@ contains
          do k=lp%cfg%kmino_,lp%cfg%kmaxo_
             do j=lp%cfg%jmino_,lp%cfg%jmaxo_
                do i=lp%cfg%imino_,lp%cfg%imaxo_
-                  fs%U(i,j,k)=0.0_WP
-                  fs%V(i,j,k)=0.0_WP
-                  fs%W(i,j,k)=0.0_WP
+                  fs%U(i,j,k)=0.0_WP;fs%rhoU(i,j,k)=0.0_WP
+                  fs%V(i,j,k)=0.0_WP;fs%rhoV(i,j,k)=0.0_WP
+                  fs%W(i,j,k)=0.0_WP;fs%rhoW(i,j,k)=0.0_WP
                end do
             end do
          end do
+         call fs%get_bcond('gas_inj',mybc)
+         do n=1,mybc%itr%no_
+            i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+            fs%rhoU(i,j,k)=v_injG*fs%rho(i,j,k)
+            fs%U(i,j,k)   =v_injG
+         end do
+         call fs%apply_bcond(time%t,time%dt)
+         call T_sc%get_drhodt(drhodt=resT,dt=time%dt) ! use resT to hold our drhodt :)
+         call fs%get_div(drhodt=resT)
+         ! Compute MFR through all boundary conditions
+         call fs%correct_mfr(drhodt=resT)
+         call fs%rho_divide()
          call fs%interp_vel(Ui,Vi,Wi)
       end block initialize_fs
+
+      ! Create an LES model
+      create_sgs: block
+         sgs=sgsmodel(cfg=fs%cfg,umask=fs%umask,vmask=fs%vmask,wmask=fs%wmask)
+      end block create_sgs
 
       ! Create partmesh object for Lagrangian particle output
       create_pmesh: block
@@ -388,10 +508,13 @@ contains
          ! Add variables to output
          call ens_out%add_particle('particles',pmesh)
          call ens_out%add_vector('velocity',fs%U,fs%V,fs%W)
-         call ens_out%add_vector('source',lp%srcU,lp%srcV,lp%srcW)
-         call ens_out%add_scalar('epsp',lp%VF)
+         call ens_out%add_vector('srcUVW',lp%srcU,lp%srcV,lp%srcW)
+         ! call ens_out%add_scalar('epsp',lp%VF)
          call ens_out%add_scalar('yf',Yf_sc%SC)
          call ens_out%add_scalar('temperature',T_sc%SC)
+         call ens_out%add_scalar('density',T_sc%rho)
+         call ens_out%add_scalar('srcM',lp%srcM)
+         call ens_out%add_scalar('srcE',lp%srcE)
 
          ! Output to ensight
          if (ens_evt%occurs()) call ens_out%write_data(time%t)
@@ -412,20 +535,23 @@ contains
          call mfile%add_column(time%dt,'dt')
          call mfile%add_column(fs%Umax,'FS_Max_U')
          call mfile%add_column(fs%Vmax,'FS_Max_V')
-         call mfile%add_column(fs%Wmax,'FS_Max_W')
+         ! call mfile%add_column(fs%Wmax,'FS_Max_W')
          call mfile%add_column(Yf_sc%SCmin,'Yf_min')
          call mfile%add_column(Yf_sc%SCmax,'Yf_max')
          call mfile%add_column(T_sc%SCmin,'T_min')
          call mfile%add_column(T_sc%SCmax,'T_max')
          call mfile%add_column(lp%np,'N_part')
+         call mfile%add_column(nInj,'N_inj')
+         call mfile%add_column(lp%nEvap,'N_evap')
          ! call mfile%add_column(lp%VFmean,'Mean_VF')
-         if (lp%cfg%amRoot) then
-            call mfile%add_column(lp%Umin,'P_Umin')
+         ! call mfile%add_column(lp%Umin,'P_Umin')
             call mfile%add_column(lp%Umean,'P_Umean')
+         ! call mfile%add_column(lp%Xmin,'P_Xmin')
+         ! call mfile%add_column(lp%Xmax,'P_Xmax')
             call mfile%add_column(lp%Umax,'P_Umax')
             call mfile%add_column(lp%dmean,'P_dmean')
             call mfile%add_column(lp%Tmean,'P_Tmean')
-         end if
+         call mfile%add_column(lp%Tmax,'P_Tmax')
          ! call mfile%add_column(Bm_debug,'Spalding')
          call mfile%write()
 
@@ -436,18 +562,18 @@ contains
          call cflFile%add_column(max(fs%CFLv_x,fs%CFLv_y,fs%CFLv_z),'max_CFLv')
          call cflFile%write()
 
-         pfile=monitor(amroot=lp%cfg%amRoot,name='particle')
-         call pfile%add_column(time%n,'T_step')
-         call pfile%add_column(time%t,'Time')
-         call pfile%add_column(time%dt,'dt')
-         if (lp%cfg%amRoot) then
-            call pfile%add_column(lp%p(1)%vel(1),'Part_U')
-            call pfile%add_column(lp%p(1)%vel(2),'Part_V')
-            call pfile%add_column(lp%p(1)%vel(3),'Part_W')
-            call pfile%add_column(lp%p(1)%d,'Part_d')
-            call pfile%add_column(lp%p(1)%T_d,'Part_T')
-         end if
-         call pfile%write()
+         ! pfile=monitor(amroot=lp%cfg%amRoot,name='particle')
+         ! call pfile%add_column(time%n,'T_step')
+         ! call pfile%add_column(time%t,'Time')
+         ! call pfile%add_column(time%dt,'dt')
+         ! if (lp%cfg%amRoot) then
+         !    call pfile%add_column(lp%p(1)%vel(1),'Part_U')
+         !    call pfile%add_column(lp%p(1)%vel(2),'Part_V')
+         !    call pfile%add_column(lp%p(1)%vel(3),'Part_W')
+         !    call pfile%add_column(lp%p(1)%d,'Part_d')
+         !    call pfile%add_column(lp%p(1)%T_d,'Part_T')
+         ! end if
+         ! call pfile%write()
       end block create_monitor
 
    end subroutine simulation_init
@@ -544,6 +670,26 @@ contains
             ! print*,'max rho2',maxval(Yf_sc%rho)
             
             ! Apply other boundary conditions on the resulting field
+            scalar_dirichlet : block
+               use vdscalar_class, only: bcond
+               type(bcond),pointer::mybc
+               integer :: i,j,k,n
+               call T_sc%get_bcond('gas_inj',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  T_sc%SC(i,j,k) =T_inj;  T_sc%rhoSC(i,j,k) =T_inj*T_sc%rho(i,j,k)
+                  Yf_sc%SC(i,j,k)=0.0_WP; Yf_sc%rhoSC(i,j,k)=0.0_WP
+               end do  
+
+               ! ! very very very very janky exit boundary condition.... should implement clipped neumann....
+               ! call T_sc%get_bcond('chop_out',mybc)
+               ! do n=1,mybc%itr%no_
+               !    i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+               !    T_sc%SC(i,j,k) =T_inj;  T_sc%rhoSC(i,j,k) =T_inj*T_sc%rho(i,j,k)
+               !    Yf_sc%SC(i,j,k)=0.0_WP; Yf_sc%rhoSC(i,j,k)=0.0_WP
+               ! end do  
+
+            end block scalar_dirichlet
             call T_sc%apply_bcond(time%t,time%dt)
             call Yf_sc%apply_bcond(time%t,time%dt)
             ! print*,'here0C',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
@@ -564,23 +710,51 @@ contains
             ! T_sc%SC=resT/T_sc%rho
             ! Yf_sc%SC=resYf/Yf_sc%rho
 
-            ! UPDATE THE VISCOSITY
-            update_visc: block
+            ! UPDATE THE VISCOSITY & APPLY SUBGRID MODELING
+            update_visc_sgs: block
                use fluidTable_class, only: mu_ID
                integer :: i,j,k
-
+               ! Get the turbulent viscosity
+               call fs%interp_vel(Ui,Vi,Wi)
+               call fs%get_strainrate(Ui=Ui,Vi=Vi,Wi=Wi,SR=SR)
+               call sgs%get_visc(dt=time%dtold,rho=T_sc%rho,Ui=Ui,Vi=Vi,Wi=Wi,SR=SR)
+               ! Loop some things
                do k=fs%cfg%kmin_,fs%cfg%kmax_
                   do j=fs%cfg%jmin_,fs%cfg%jmax_
                      do i=fs%cfg%imin_,fs%cfg%imax_
+                        ! Get the normal dynamic viscosity
                         call gTab%evalProps(propOut=fs%visc(i,j,k),T_q=T_sc%SC(i,j,k),P_q=p0,propID=mu_ID)
-                        
+                        ! Apply the turbulent viscosity
+                        fs%visc(i,j,k) = fs%visc(i,j,k) + sgs%visc(i,j,k)
+            ! UPDATE THE DIFFUSIVITY
+                        T_sc%diff(i,j,k) = diff_T +sgs%visc(i,j,k)/ T_sc%rho(i,j,k)
+                        Yf_sc%diff(i,j,k)= diff_Yf+sgs%visc(i,j,k)/Yf_sc%rho(i,j,k)
                      end do
                   end do
                end do
-            end block update_visc
-            ! UPDATE THE DIFFUSIVITY
+            end block update_visc_sgs
+            ! print*,'max turbulent visc:',maxval(sgs%visc)
             ! ===================================================
-            
+            ! for reference, from drop_breakup:
+            ! sgsmodel: block
+            !    integer :: i,j,k
+            !    resU=fs%rho_g
+            !    call sgs%get_visc(dt=time%dtold,rho=resU,Ui=Ui,Vi=Vi,Wi=Wi,SR=SR)
+            !    where (sgs%visc.lt.-fs%visc_g)
+            !       sgs%visc=-fs%visc_g
+            !    end where
+            !    do k=fs%cfg%kmino_+1,fs%cfg%kmaxo_
+            !       do j=fs%cfg%jmino_+1,fs%cfg%jmaxo_
+            !          do i=fs%cfg%imino_+1,fs%cfg%imaxo_
+            !             fs%visc(i,j,k)   =fs%visc(i,j,k)   +sgs%visc(i,j,k)
+            !             fs%visc_xy(i,j,k)=fs%visc_xy(i,j,k)+sum(fs%itp_xy(:,:,i,j,k)*sgs%visc(i-1:i,j-1:j,k))
+            !             fs%visc_yz(i,j,k)=fs%visc_yz(i,j,k)+sum(fs%itp_yz(:,:,i,j,k)*sgs%visc(i,j-1:j,k-1:k))
+            !             fs%visc_zx(i,j,k)=fs%visc_zx(i,j,k)+sum(fs%itp_xz(:,:,i,j,k)*sgs%visc(i-1:i,j,k-1:k))
+            !          end do
+            !       end do
+            !    end do
+            ! end block sgsmodel
+
             ! ============ VELOCITY SOLVER ======================
             ! print*,'max rho4',maxval(Yf_sc%rho)
             ! Build n+1 density
@@ -628,6 +802,19 @@ contains
             call fs%apply_bcond(time%tmid,time%dtmid)
             ! print*,'here0H',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
             ! This is where dirichlet BCs would go
+            apply_dirichlet : block
+               use lowmach_class, only: bcond
+               type(bcond),pointer::mybc
+               integer :: i,j,k,n
+               call fs%get_bcond('gas_inj',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  fs%rhoU(i,j,k)=v_injG*fs%rho(i,j,k)
+                  fs%U(i,j,k)   =v_injG
+                  fs%V(i,j,k)   =0.0_WP; fs%W(i,j,k)=0.0_WP
+                  fs%rhoV(i,j,k) = 0.0_WP;fs%rhoW(i,j,k)=0.0_WP
+               end do               
+            end block apply_dirichlet
 
             ! Solve Poisson equation
             call Yf_sc%get_drhodt(dt=time%dt,drhodt=resYf)
@@ -660,40 +847,34 @@ contains
          spawn_particles: block
             use random, only: random_normal,random_uniform
             use mathtools, only: twoPi
-            integer :: i,newP,np_old
+            integer :: i,np,nAdd
             real(WP) :: theta
-            !dp,dp_sig,rp,rp_sig,u_inj,u_inj_sig
-            newP = 5
-            np_old = lp%np
             if (lp%cfg%amRoot) then
-               call lp%resize(np_old+newP)
-               do i=(np_old+1),np_old+newP
+               nAdd = int(floor(inj_rate*time%t))-nInj
+               do i=1,nAdd
+                  np=lp%np_+1; call lp%resize(np)
                   ! Give id
-                  ! lp%p(i)%id=int(i,8)
+                  lp%p(i)%id=nInj+i
                   ! Set the diameter
-                  lp%p(i)%d=random_normal(dp,dp_sig)
+                  lp%p(np)%d=random_normal(dp,dp_sig)
                   ! Set the temperature 
-                  lp%p(i)%T_d = T_d
-                  !! Assign random position in the domain
-                  ! lp%p(i)%pos=[random_uniform(lp%cfg%x(lp%cfg%imin),lp%cfg%x(lp%cfg%imax+1)),&
-                  ! &            random_uniform(lp%cfg%y(lp%cfg%jmin),lp%cfg%y(lp%cfg%jmax+1)),&
-                  ! &            random_uniform(lp%cfg%z(lp%cfg%kmin),lp%cfg%z(lp%cfg%kmax+1))]
-                  ! lp%p(i)%pos(3)=lp%cfg%zm(lp%cfg%kmin)
-   
+                  lp%p(np)%T_d = T_d
                   ! Assign position in center of domain
                   theta = random_uniform(0.0_WP,twoPi)
-                  lp%p(i)%pos = random_normal(rp,rp_sig)*[0.0_WP,cos(theta),sin(theta)]
+                  lp%p(np)%pos = random_normal(rp,rp_sig)*[0.0_WP,cos(theta),sin(theta)]
                   ! Give zero velocity
-                  lp%p(i)%vel=[random_normal(u_inj,u_inj_sig),0.0_WP,0.0_WP]
+                  lp%p(np)%vel=[random_normal(u_inj,u_inj_sig),0.0_WP,0.0_WP]
                   ! Give zero collision force
-                  lp%p(i)%col=0.0_WP
+                  lp%p(np)%col=0.0_WP
                   ! Give zero dt
-                  lp%p(i)%dt=0.0_WP
+                  lp%p(np)%dt=0.0_WP
                   ! Locate the particle on the mesh
-                  lp%p(i)%ind=lp%cfg%get_ijk_global(lp%p(i)%pos,[lp%cfg%imin,lp%cfg%jmin,lp%cfg%kmin])
+                  lp%p(np)%ind=lp%cfg%get_ijk_global(lp%p(np)%pos,[lp%cfg%imin,lp%cfg%jmin,lp%cfg%kmin])
                   ! Activate the particle
-                  lp%p(i)%flag=0
+                  lp%p(np)%flag=0
+                  lp%np_=np
                end do
+               nInj=nInj+nAdd
             end if
             ! Distribute particles
             call lp%sync()
@@ -701,10 +882,12 @@ contains
             call lp%update_VF()
 
          end block spawn_particles
+
          ! Advance particles by dt
          ! print*,'U=',maxval(fs%U),'V=',maxval(fs%V),'W=',maxval(fs%W),'rho=',maxval(fs%rho),'visc=',maxval(fs%visc),'T=',maxval(T_sc%SC),'Yf=',maxval(Yf_sc%SC)
+         ! print*,'rank',cfg%rank,'entering lp%advance with Yf_max,min:',maxval(Yf_sc%SC),minval(Yf_sc%SC)
          call lp%advance(dt=time%dt,U=fs%U,V=fs%V,W=fs%W,rho=fs%rho,visc=fs%visc,T=T_sc%SC,Yf=Yf_sc%SC,Bm_debug=Bm_debug,lTab=lTab,gTab=gTab,p_therm=p0)
-         ! print*,'max(srcM)',maxval(lp%srcM),'max(srcE)',maxval(lp%srcE)
+         print*,'rank',cfg%rank,'max(srcM)',maxval(lp%srcM),'min(srcM)',minval(lp%srcM),'max(srcE)',maxval(lp%srcE),'min(srcE)',minval(lp%srcE)
          ! Use new source terms to determine if need to reduce next time step
          ! if (maxval(abs(lp%srcE)).gt.(0.0_WP)) then
          !    temp_dt_control: block
@@ -717,7 +900,7 @@ contains
          !    end block temp_dt_control
          ! end if
          ! print*,'here2'
-         if ((lp%np.eq.0)) amDone=.true.
+         if ((lp%np.eq.0).and.(time%t.gt.3.0_WP)) amDone=.true.
          ! Output to ensight
          if (ens_evt%occurs()) then
             ensight_output: block
@@ -758,7 +941,7 @@ contains
       
       ! Deallocate work arrays
       ! deallocate(rho,visc,U,V,W)
-      
+      if (cfg%rank.eq.0) print*,'Clean termination'
    end subroutine simulation_final
    
 end module simulation

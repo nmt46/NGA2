@@ -1,5 +1,5 @@
 # Parallelization
-Partition : 1 1 1
+Partition : 8 1 1
 
 # Mesh definition
 Lx :  20e-2
@@ -10,29 +10,29 @@ ny :  20
 nz :  20
 
 # Case definition
-Droplet mean diameter :  250e-6
-Droplet diameter standard deviation : 25e-6
-Injection mean radius :  10e-3
-Injection radius standard deviation : 2e-3
-Injection mean velocity : 1
+Droplet mean diameter :                 250e-6
+Droplet diameter standard deviation :   25e-6
+Injection mean radius :                 10e-3
+Injection radius standard deviation :   2e-3
+Injection mean velocity :               1
 Injection velocity standard deviation : 0.1
-Droplet temperature :       280
-Droplet velocity :          0 0 0
-Gas inlet temperature :     473
+Droplet temperature :                   280
+Gas inlet temperature :                 600
+Injection rate :                        100      ! Particles/sec
+Gas inlet velocity:                     0.25
+Gas inlet radius:                       1e-2
 
+Fuel :                                  ethanol
+Fuel-gas Schmidt number:                1.5
+Gas :                                   air
+Gas Prandtl number:                     0.7
+Pressure :                              101325
 
-
-# Fluid properties
-Fuel :                      ethanol
-Fuel-gas Schmidt number:    1.5
-Gas :                       air
-Gas Prandtl number:         0.7
-Pressure :                  101325
-Thermal diffusivity :       2e-5 ! from engineeringtoolbox; [m^2/s]
-Fuel diffusivity :          11e-6 !http://webserver.dmt.upm.es/~isidoro/dat1/Mass%20diffusivity%20data.pdf
+Thermal diffusivity :                   2e-5 ! from engineeringtoolbox; [m^2/s]
+Fuel diffusivity :                      11e-6 !http://webserver.dmt.upm.es/~isidoro/dat1/Mass%20diffusivity%20data.pdf
 
 # Time integration
-Max timestep size : 0.15
+Max timestep size : 0.01
 Max cfl number :    0.8
 Max time :          100
 Max temperature change : 10 ! the maximum allowable temperature change per time step [K/timeStep]
@@ -46,7 +46,7 @@ Implicit tolerance : 1e-6
 Implicit iteration : 100
 
 # Ensight ouput
-Ensight output period : 0.1!1e-2
+Ensight output period : 0.1
 
 # Restart and save
 Restart output period : 100
