@@ -38,7 +38,7 @@ module lpt_class
    end type part
    !> Number of blocks, block length, and block types in a particle
    integer, parameter                         :: part_nblock=3
-   integer           , dimension(part_nblock) :: part_lblock=[1,11,4]
+   integer           , dimension(part_nblock) :: part_lblock=[1,12,4]
    type(MPI_Datatype), dimension(part_nblock) :: part_tblock=[MPI_INTEGER8,MPI_DOUBLE_PRECISION,MPI_INTEGER]
    !> MPI_PART derived datatype and size
    type(MPI_Datatype) :: MPI_PART
@@ -58,7 +58,8 @@ module lpt_class
       integer :: np_                                      !< Local number of particles
       integer, dimension(:), allocatable :: np_proc       !< Number of particles on each processor
       type(part), dimension(:), allocatable :: p          !< Array of particles of type part
-      
+      integer :: nEvap_=0                                 !< Number of particles locally evaporated
+      integer :: nEvap                                    !< Number of particles globally evaporated
       ! Overlap particle (i.e., ghost) data
       integer :: ng_                                      !< Local number of ghosts
       type(part), dimension(:), allocatable :: g          !< Array of ghosts of type part
@@ -86,8 +87,9 @@ module lpt_class
       real(WP) :: Umin,Umax,Umean,Uvar                    !< U velocity info
       real(WP) :: Vmin,Vmax,Vmean,Vvar                    !< V velocity info
       real(WP) :: Wmin,Wmax,Wmean,Wvar                    !< W velocity info
-      real(WP) :: Tmean,Tvar                              !< Temperature info
+      real(WP) :: Tmin,Tmax,Tmean,Tvar                    !< Temperature info
       integer  :: np_new,np_out                           !< Number of new and removed particles
+      real(WP) :: Xmax,Xmin                               !< Max/min x-position of particles
       
       ! Particle volume fraction
       real(WP), dimension(:,:,:), allocatable :: VF       !< Particle volume fraction, cell-centered
@@ -524,6 +526,7 @@ contains
       do i=1,this%np_
          ! Time-integrate until dt_done=dt
          ! if (this%cfg%rank.eq.0) print*,'here0',i
+         ! print*,'rank',this%cfg%rank,'advanceNext'
          dt_done=0.0_WP
          notEvap = .true.
          dm = 0.0_WP
@@ -532,39 +535,49 @@ contains
          do while ((dt_done.lt.dt).and.notEvap)
             if (((Tdot.gt.0.0_WP).and.(TdotMid.lt.0.0_WP)).or.(((Tdot.lt.0.0_WP).and.(TdotMid.gt.0.0_WP)))) this%p(i)%dt = 0.5_WP*this%p(i)%dt
             ! Decide the timestep size
+            this%p(i)%dt = min(this%p(i)%dt,1.0_WP*this%cfg%dx(1)/norm2(this%p(i)%vel))
             mydt=min(this%p(i)%dt,dt-dt_done)
+            ! print*,'rank',this%cfg%rank,'advanceHere0'
             ! Remember the particle
             pold=this%p(i)
-            m_d = this%rho*Pi/6.0_WP*this%p(i)%d**3 ! current mass
+            m_d = this%rho*Pi/6.0_WP*this%p(i)%d**3.0_WP ! current mass
+            ! print*,'rank',this%cfg%rank,'advanceHere1'
             m_old = m_d ! store old mass
             ! Advance with Euler prediction
             call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),Tdot=Tdot,Mdot=Mdot,acc=acc,opt_dt=this%p(i)%dt,&
                Bm_debug=Bm_debug,lTab=lTab,gTab=gTab,p_therm=p_therm)
+            ! print*,'rank',this%cfg%rank,'advanceHere2'
             ! Advance pos, vel 1st half
             this%p(i)%pos=pold%pos+0.5_WP*mydt*this%p(i)%vel
             this%p(i)%vel=pold%vel+0.5_WP*mydt*(acc+this%gravity+this%p(i)%col)
+            ! print*,'rank',this%cfg%rank,'advanceHere3'
             ! Advance mass loss 1st half
             m_d = m_old+0.5_WP*mydt*Mdot
             this%p(i)%d = (6.0_WP*m_d/(Pi*this%rho))**(1.0_WP/3.0_WP)
+            ! print*,'rank',this%cfg%rank,'advanceHere4'
             ! Advance energy transfer
             this%p(i)%T_d = pold%T_d + 0.5_WP*mydt*Tdot
             TdotMid = Tdot
             !   if (this%cfg%rank.eq.0) print*,'here1',i
             ! Correct with midpoint rule
+            ! print*,'rank',this%cfg%rank,'advanceHere5'
             call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=this%p(i)%dt,&
                Bm_debug=Bm_debug,lTab=lTab,gTab=gTab,p_therm=p_therm)
+            ! print*,'rank',this%cfg%rank,'advanceHere6'
             !   if (this%cfg%rank.eq.0) print*,'here2',i
             ! Advance pos, vel
             this%p(i)%pos=pold%pos+mydt*this%p(i)%vel
             this%p(i)%vel=pold%vel+mydt*(acc+this%gravity+this%p(i)%col)
+            ! print*,'rank',this%cfg%rank,'advanceHere7'
             ! Advance mass loss 2nd half
             m_d = m_old+mydt*Mdot
             dm = m_d-m_old;
             !   if (this%cfg%rank.eq.0) print*,'here3',i
             this%p(i)%d = (6.0_WP*m_d/(Pi*this%rho))**(1.0_WP/3.0_WP)! translate new mass to new diameter
+            ! print*,'rank',this%cfg%rank,'advanceHere8'
             ! Advance energy transfer 2nd half
             this%p(i)%T_d = pold%T_d + mydt*Tdot
-
+            ! print*,'rank',this%cfg%rank,'advanceHere9'
             calc_sourceE: block
                use fluidTable_class, only: Lv_ID, Cp_ID
                real(WP) :: Lv,Cp_l ! Fluid properties
@@ -574,47 +587,50 @@ contains
                ! Evaporate away the drop by mainatinin conserved quanities
                if (this%p(i)%d.le.this%min_diam) then
                      ! add to source terms when killing the drop
-                     dm = dm + this%rho*Pi/6.0_WP*this%p(i)%d**3
-                     dE = dE - Lv*m_d
+                     dm = dm - this%rho*Pi/6.0_WP*this%p(i)%d**3.0_WP
+                     dE = dE + Lv*m_d
                      this%p(i)%flag = 1
                      notEvap = .false.
+                     this%nEvap_ = this%nEvap_+1
                end if
-                  ! print*,'np checkpoint 1',this%np
+                  ! print*,'rank',this%cfg%rank,'np checkpoint1a',this%np,'pos:',this%p(i)%pos,'ind',this%p(i)%ind,'ID',this%p(i)%id,'diam',this%p(i)%d
             end block calc_sourceE
             !   if (this%cfg%rank.eq.0) print*,'here4',i
             ! Relocalize
             this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
+            ! print*,'rank',this%cfg%rank,'np checkpoint1b',this%np,'pos:',this%p(i)%pos,'ind',this%p(i)%ind,'ID',this%p(i)%id,'diam',this%p(i)%d
             ! Send source term back to the mesh
             dmom=mydt*acc*this%rho*Pi/6.0_WP*this%p(i)%d**3
-            ! print*,'np checkpoint 2',this%np
+            ! print*,'rank',this%cfg%rank,'np checkpoint 2',this%np
             if (this%cfg%nx.gt.1) call this%cfg%set_scalar(Sp=-dmom(1),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcU,bc='n')
             if (this%cfg%ny.gt.1) call this%cfg%set_scalar(Sp=-dmom(2),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcV,bc='n')
             if (this%cfg%nz.gt.1) call this%cfg%set_scalar(Sp=-dmom(3),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcW,bc='n')
             call this%cfg%set_scalar(Sp=-dm,pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcM,bc='n')
             call this%cfg%set_scalar(Sp=-dE,pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%srcE,bc='n')
-            ! print*,'np checkpoint 3',this%np
+            ! print*,'rank',this%cfg%rank,'np checkpoint 3',this%np
             ! Increment
             dt_done=dt_done+mydt
             !   if (this%cfg%rank.eq.0) print*,'here5',i
          end do
-         ! print*,'np checkpoint 4',this%np
+         ! print*,'rank',this%cfg%rank,'np checkpoint 4',this%np
          ! Correct the position to take into account periodicity
          if (this%cfg%xper) this%p(i)%pos(1)=this%cfg%x(this%cfg%imin)+modulo(this%p(i)%pos(1)-this%cfg%x(this%cfg%imin),this%cfg%xL)
          if (this%cfg%yper) this%p(i)%pos(2)=this%cfg%y(this%cfg%jmin)+modulo(this%p(i)%pos(2)-this%cfg%y(this%cfg%jmin),this%cfg%yL)
          if (this%cfg%zper) this%p(i)%pos(3)=this%cfg%z(this%cfg%kmin)+modulo(this%p(i)%pos(3)-this%cfg%z(this%cfg%kmin),this%cfg%zL)
-         ! print*,'np checkpoint 5',this%np
+         ! print*,'rank',this%cfg%rank,'np checkpoint 5',this%np
          ! Handle particles that have left the domain
          if (this%p(i)%pos(1).lt.this%cfg%x(this%cfg%imin).or.this%p(i)%pos(1).gt.this%cfg%x(this%cfg%imax+1)) this%p(i)%flag=1
          if (this%p(i)%pos(2).lt.this%cfg%y(this%cfg%jmin).or.this%p(i)%pos(2).gt.this%cfg%y(this%cfg%jmax+1)) this%p(i)%flag=1
          if (this%p(i)%pos(3).lt.this%cfg%z(this%cfg%kmin).or.this%p(i)%pos(3).gt.this%cfg%z(this%cfg%kmax+1)) this%p(i)%flag=1
-         ! print*,'np checkpoint 6',this%np
+         ! print*,'rank',this%cfg%rank,'np checkpoint6a',this%np,'pos:',this%p(i)%pos,'ind',this%p(i)%ind,'ID',this%p(i)%id,'diam',this%p(i)%d
          ! Relocalize the particle
          this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
-         !   if (this%cfg%rank.eq.0) print*,'here6',i
+         ! print*,'rank',this%cfg%rank,'np checkpoint6b',this%np,'pos:',this%p(i)%pos,'ind',this%p(i)%ind,'ID',this%p(i)%id,'diam',this%p(i)%d
       end do
-      ! print*,'np checkpoint 7',this%np
+      ! print*,'rank',this%cfg%rank,'np checkpoint 7',this%np
       ! Communicate particles
       call this%sync()
+      ! print*,'rank',this%cfg%rank,'postSyncAdvance'
       !   if (this%cfg%rank.eq.0) print*,'here7'
       ! Divide source arrays by volume, sum at boundaries, and volume filter
       this%srcU=this%srcU/this%cfg%vol; call this%cfg%syncsum(this%srcU); call this%filter(this%srcU)
@@ -622,7 +638,7 @@ contains
       this%srcW=this%srcW/this%cfg%vol; call this%cfg%syncsum(this%srcW); call this%filter(this%srcW)
       this%srcM=this%srcM/this%cfg%vol; call this%cfg%syncsum(this%srcM); call this%filter(this%srcM)
       this%srcE=this%srcE/this%cfg%vol; call this%cfg%syncsum(this%srcE); call this%filter(this%srcE)
-      ! print*,'np checkpoint 8',this%np
+      ! print*,'rank',this%cfg%rank,'np checkpoint 8',this%np
       ! Recompute volume fraction
       call this%update_VF()
       
@@ -639,7 +655,7 @@ contains
             if (verbose.gt.0) call log(message)
          end if
       end block logging
-      ! print*,'np checkpoint 9',this%np
+      ! print*,'rank',this%cfg%rank,'np checkpoint 9',this%np
    end subroutine advance
    
    
@@ -669,6 +685,7 @@ contains
       real(WP), dimension(3) :: fvel
       real(WP),optional :: Bm_debug
       ! if (this%cfg%rank.eq.0) print*,'RHS0'
+      ! print*,'rank',this%cfg%rank,'RHS0'
       ! Interpolate the fluid phase velocity to the particle location
       fvel=this%cfg%get_velocity(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),U=U,V=V,W=W)
       ! Interpolate the fluid phase viscosity to the particle location
@@ -681,23 +698,25 @@ contains
       pVF=this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=this%VF,bc='n')
       if (pVF.lt.0.0_WP) pVF=0.0_WP
       fVF=1.0_WP-pVF
+      ! print*,'rank',this%cfg%rank,'RHS1'
       ! Particle Reynolds number
       Re=frho*norm2(p%vel-fvel)*p%d/fvisc+epsilon(1.0_WP)
-      ! if (this%cfg%rank.eq.0) print*,'pVf:',pVF,'fVf:',fVf
-      ! if (this%cfg%rank.eq.0) print*,'RHS1'
+
       ! Stokes correlation
       !corr=1.0_WP
       ! Schiller Naumann correlation
       !corr=1.0_WP+0.15_WP*Re**(0.687_WP)
       ! Tenneti and Subramaniam (2011)
       b1=5.81_WP*pVF/fVF**3+0.48_WP*pVF**(1.0_WP/3.0_WP)/fVF**4
-      ! if (this%cfg%rank.eq.0) print*,'RHS1a'
+
+      ! print*,'rank',this%cfg%rank,'RHS2'
       b2=pVF**3*Re*(0.95_WP+0.61_WP*pVF**3/fVF**2)
-      ! if (this%cfg%rank.eq.0) print*,'RHS1b'
       corr=fVF*(1.0_WP+0.15_WP*Re**(0.687_WP))/fVF**3+b1+b2
-      ! if (this%cfg%rank.eq.0) print*,'RHS1c'
+      ! print*,'rank',this%cfg%rank,'RHS3'
+
       ! Particle response time
       tau=this%rho*p%d**2/(18.0_WP*fvisc*corr)
+      ! print*,'rank',this%cfg%rank,'RHS4'
       ! if (this%cfg%rank.eq.0) print*,'RHS1d'
       ! Return acceleration
       acc=fVF*(fvel-p%vel)/tau
@@ -710,7 +729,7 @@ contains
          real(WP) :: T_g,Yf_g,Yf_s ! Local gas temp, fuel mass fraction; drop surface mass fraction (from mesh)
          real(WP) :: tau_acc,tau_mdot,tau_T ! determining fining for mass loss
          real(WP) :: scale_tau
-
+         ! print*,'rank',this%cfg%rank,'RHS5'
          
          T_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=T,bc='n')! get T_g from interpolating T
 
@@ -728,7 +747,7 @@ contains
          Sc_g = gTab%Sc
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-
+         ! print*,'rank',this%cfg%rank,'RHS6'
          Nu_g = 2.0_WP+0.552_WP*(Re)**0.5_WP*(Pr_g)**(1.0_WP/3.0_WP)
          Sh_g = 2.0_WP+0.552_WP*(Re)**0.5_WP*(Sc_g)**(1.0_WP/3.0_WP)
          
@@ -738,58 +757,83 @@ contains
          Yf_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=Yf,bc='n')! get T_g from interpolating T
          if (Yf_g.lt.0.0_WP) Yf_g = 0.0_WP ! Clip away negative Yf noise
          ! Spalding number
-         ! print*,'Yf_s',Yf_s,'Yf_g',Yf_g
          Bm = (Yf_s-Yf_g)/(1.0_WP-Yf_s)
          Bm_debug = Bm
-         ! print*,'Spalding:',Bm,'Yf_g',Yf_g,'Yf_s',Yf_s,'T_d',p%T_d
+         if (Yf_g.gt.maxval(Yf)*30.0_WP) then
+            print*,'Warning, Yf_g artificially high. Yf_g:',Yf_g,'max(Yf_g):',maxval(Yf),'pos',p%pos,'ind',p%ind,'ID',p%id
+            ! Yf_too_high : block
+            !    integer :: i,j,k,k2
+            !    ! Stolen from config_class
+            !    ! Find right i index
+            !    i=max(min(this%cfg%imaxo_-1,p%ind(1)),this%cfg%imino_)
+            !    do while (p%pos(1)-this%cfg%xm(i  ).lt.0.0_WP.and.i  .gt.this%cfg%imino_); i=i-1; end do
+            !    do while (p%pos(1)-this%cfg%xm(i+1).ge.0.0_WP.and.i+1.lt.this%cfg%imaxo_); i=i+1; end do
+            !    ! Find right j index
+            !    j=max(min(this%cfg%jmaxo_-1,p%ind(2)),this%cfg%jmino_)
+            !    do while (p%pos(2)-this%cfg%ym(j  ).lt.0.0_WP.and.j  .gt.this%cfg%jmino_); j=j-1; end do
+            !    do while (p%pos(2)-this%cfg%ym(j+1).ge.0.0_WP.and.j+1.lt.this%cfg%jmaxo_); j=j+1; end do
+            !    ! Find right k index
+            !    k=max(min(this%cfg%kmaxo_-1,p%ind(3)),this%cfg%kmino_)
+            !    do while (p%pos(3)-this%cfg%zm(k  ).lt.0.0_WP.and.k  .gt.this%cfg%kmino_); k=k-1; end do
+            !    do while (p%pos(3)-this%cfg%zm(k+1).ge.0.0_WP.and.k+1.lt.this%cfg%kmaxo_); k=k+1; end do                  
+            !    ! print*,'Surrounding Yf field:'
+            !    do k2=max(k-1,this%cfg%kmino_),min(k+1,this%cfg%kmaxo_)
+            !       ! print*,Yf(max(i-1,this%cfg%imino_):min(i+1,this%cfg%imaxo_),&
+            !              max(j-1,this%cfg%jmino_):min(j+1,this%cfg%jmaxo_),&
+            !              k2)
+            !    end do
+            ! end block Yf_too_high 
+            call die("Yf interpolation error, Yf_interp>30*maxval(Yf_array)")
+         end if
+         ! print*,'rank',this%cfg%rank,'ID',p%id,'Spalding:',Bm,'Yf_g',Yf_g,'Yf_s',Yf_s,'T_d',p%T_d
+         if (p%T_d.gt.T_b) then
+            ! print*,'About to die, rank',this%cfg%rank,'ID',p%id,'T_d',p%T_d,'diam',p%d,'pos',p%pos,'dt',p%dt
+            call die('Drop Temp above boiling')
+         end if
          if (Bm.lt.-1.0_WP) call die('Spaulding Number Less than -1...')
          ! Mass transfer
          m_d = (this%rho*Pi*p%d**3.0_WP)/6.0_WP
          Mdot = -Sh_g*m_d*log(1.0_WP+Bm)/(3.0_WP*Sc_g*tau)
-         ! print*,'Mdot:',Mdot
+         ! print*,'rank',this%cfg%rank,'Mdot:',Mdot
          ! if (this%cfg%rank.eq.0) print*,'RHS3'
          ! Energy transfer
          beta = (-3.0_WP*Pr_g*tau/2.0_WP*Mdot/m_d)
          f2 = beta/(exp(beta)-1.0_WP)
          Tdot = Nu_g*Cp_g*f2*(T_g-p%T_d)/(3.0_WP*Pr_g*Cp_l*tau) + Mdot*Lv/(m_d*Cp_l)
-         ! print*,'Tdot:',Tdot
+         ! print*,'rank',this%cfg%rank,'Tdot:',Tdot
 
          ! A multiplier of temperature time step to decrease step size as drop diameter decreases:
-         ! if (p%d.ge.1e-3) then
-         !    scale_tau = 5.0_WP
-         ! elseif (p%d.ge.5e-4) then
-         !    scale_tau = 5.0_WP
-         ! elseif (p%d.ge.1e-4) then
-         !    scale_tau = 10.0_WP
+         ! if (p%d.ge.4e-5) then
+         !    scale_tau = 1.0_WP
          ! elseif (p%d.ge.1e-5) then
-         !    scale_tau = 10.0_WP
+         !    scale_tau = 2.0_WP
          ! else
          !    scale_tau = 5.0_WP
          ! end if
-         if (Tdot.lt.-500.0_WP) then
-            scale_tau = 1.0_WP!*abs(Tdot/500.0_WP)
+         if (p%T_d.ge.(T_b*0.9_WP)) then
+            scale_tau = T_b/(10.0_WP*abs(T_b-p%T_d+epsilon(1.0_WP)))
          else
             scale_tau = 1.0_WP
          end if
+         ! print*,'rank',this%cfg%rank,'T_d',p%T_d,'T_b',T_b,'scaling',scale_tau
          ! Determine optimal time (inertial, thermal, mass loss)
          tau_acc = abs(tau)/real(this%nstep,WP)
          if (Mdot.eq.0.0_WP) then
-            tau_mdot = abs(m_d/epsilon(1.0_WP))
+            tau_mdot = huge(1.0_WP)
          else
          tau_mdot = abs(m_d/Mdot)
          end if
-         ! print*,'tau_mdot',tau_mdot
-         ! print*,'Nu_g:',Nu_g,'tau',tau,'f2',f2,'T_d',p%T_d
+         ! print*,'rank',this%cfg%rank,'ID',p%id,'Nu_g:',Nu_g,'tau',tau,'f2',f2,'T_d',p%T_d
          if ((T_g-p%T_d).eq.0.0_WP) then
-            tau_T = 1e3
+            tau_T = huge(1.0_WP)
          else
             tau_T = abs((3.0_WP*Pr_g*Cp_l*tau)/(Nu_g*Cp_g*f2)*(T_b-p%T_d)/(T_g-p%T_d))
          end if
-         opt_dt = min(tau_acc,tau_mdot,tau_T)/scale_tau!/20.0_WP
-         ! print*,'tau_T',tau_T,'T_dot:',Tdot,'T_d:',p%T_d,'T_g',T_g,'opt_dt',opt_dt
+         opt_dt = min(tau_acc,tau_mdot,tau_T)/scale_tau
+         ! print*,'rank',this%cfg%rank,'ID',p%id,'tau_T',tau_T,'T_dot:',Tdot,'T_d:',p%T_d,'T_g',T_g,'opt_dt',opt_dt
          if (.not.((tau_T.ge.0.0_WP).or.(tau_T.lt.0.0_WP))) call die('NaN time constant')
          ! if (tau_T.le.1.0_WP) call die('NaN time constant')
-         ! print*,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
+         ! print*,'rank',this%cfg%rank,'ID',p%id,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
          ! if (this%cfg%rank.eq.0) print*,'RHS4'
       end block evaporate_rhs
 
@@ -889,13 +933,15 @@ contains
       this%Umin=huge(1.0_WP); this%Umax=-huge(1.0_WP); this%Umean=0.0_WP
       this%Vmin=huge(1.0_WP); this%Vmax=-huge(1.0_WP); this%Vmean=0.0_WP
       this%Wmin=huge(1.0_WP); this%Wmax=-huge(1.0_WP); this%Wmean=0.0_WP
-      this%Tmean=0.0_WP
+      this%Xmin=huge(1.0_WP); this%Xmax=-huge(1.0_WP)
+      this%Tmin=huge(1.0_WP); this%Tmax=-huge(1.0_WP); this%Tmean=0.0_WP
       do i=1,this%np_
          this%dmin=min(this%dmin,this%p(i)%d     ); this%dmax=max(this%dmax,this%p(i)%d     ); this%dmean=this%dmean+this%p(i)%d
          this%Umin=min(this%Umin,this%p(i)%vel(1)); this%Umax=max(this%Umax,this%p(i)%vel(1)); this%Umean=this%Umean+this%p(i)%vel(1)
          this%Vmin=min(this%Vmin,this%p(i)%vel(2)); this%Vmax=max(this%Vmax,this%p(i)%vel(2)); this%Vmean=this%Vmean+this%p(i)%vel(2)
          this%Wmin=min(this%Wmin,this%p(i)%vel(3)); this%Wmax=max(this%Wmax,this%p(i)%vel(3)); this%Wmean=this%Wmean+this%p(i)%vel(3)
-         this%Tmean=this%Tmean+this%p(i)%T_d
+         this%Xmin=min(this%Xmin,this%p(i)%pos(1)); this%Xmax=max(this%Xmax,this%p(i)%pos(1));
+         this%Tmin=min(this%Tmin,this%p(i)%T_d   ); this%Tmax=max(this%Tmax,this%p(i)%T_d   ); this%Tmean=this%Tmean+this%p(i)%T_d
       end do
       call MPI_ALLREDUCE(this%dmin ,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%dmin =buf
       call MPI_ALLREDUCE(this%dmax ,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%dmax =buf
@@ -909,9 +955,14 @@ contains
       call MPI_ALLREDUCE(this%Wmin ,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%Wmin =buf
       call MPI_ALLREDUCE(this%Wmax ,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%Wmax =buf
       call MPI_ALLREDUCE(this%Wmean,buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%Wmean=buf/safe_np
+      call MPI_ALLREDUCE(this%Tmin ,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%Tmin =buf
+      call MPI_ALLREDUCE(this%Tmax ,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%Tmax =buf
       call MPI_ALLREDUCE(this%Tmean,buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%Tmean=buf/safe_np
 
-      
+      call MPI_ALLREDUCE(this%Xmax,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%Xmax=buf
+      call MPI_ALLREDUCE(this%Xmin,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%Xmin=buf
+      call MPI_ALLREDUCE(real(this%nEvap_,WP),buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%nEvap=buf
+
       ! Diameter and velocity variance
       this%dvar=0.0_WP
       this%Uvar=0.0_WP
