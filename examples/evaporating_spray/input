@@ -1,13 +1,13 @@
 # Parallelization
-Partition : 8 1 1
+Partition : 12 4 4
 
 # Mesh definition
 Lx :  20e-2
-Ly :  5e-2
-Lz :  5e-2
-nx :  80
-ny :  20
-nz :  20
+Ly :  10e-2
+Lz :  10e-2
+nx :  200
+ny :  50
+nz :  50
 
 # Case definition
 Droplet mean diameter :                 250e-6
@@ -18,7 +18,7 @@ Injection mean velocity :               1
 Injection velocity standard deviation : 0.1
 Droplet temperature :                   280
 Gas inlet temperature :                 600
-Injection rate :                        100      ! Particles/sec
+Injection rate :                        200      ! Particles/sec
 Gas inlet velocity:                     0.25
 Gas inlet radius:                       1e-2
 
@@ -34,7 +34,7 @@ Fuel diffusivity :                      11e-6 !http://webserver.dmt.upm.es/~isid
 # Time integration
 Max timestep size : 0.01
 Max cfl number :    0.8
-Max time :          100
+Max time :          10
 Max temperature change : 10 ! the maximum allowable temperature change per time step [K/timeStep]
 
 # Pressure solver
