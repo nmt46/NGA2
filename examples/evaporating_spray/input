@@ -35,7 +35,7 @@ Fuel diffusivity :                      11e-6 !http://webserver.dmt.upm.es/~isid
 # Time integration
 Max timestep size : 0.01
 Max cfl number :    0.8
-Max time :          100
+Max time :          10
 Max temperature change : 10 ! the maximum allowable temperature change per time step [K/timeStep]
 
 # Pressure solver
