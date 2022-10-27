@@ -1,26 +1,27 @@
 # Parallelization
-Partition : 8 1 1
+Partition : 4 1 1
 
 # Mesh definition
-Lx :  20e-2
+Lx :  5e-2
 Ly :  5e-2
-Lz :  5e-2
-nx :  80
-ny :  20
-nz :  20
+Lz :  5e-2 !6.25e-4!
+nx :  8
+ny :  1
+nz :  8
 
 # Case definition
 Droplet mean diameter :                 250e-6
 Droplet diameter standard deviation :   25e-6
-Injection mean radius :                 10e-3
-Injection radius standard deviation :   2e-3
+Injection mean radius :                 4e-3
+Injection radius standard deviation :   1e-3
 Injection mean velocity :               1
 Injection velocity standard deviation : 0.1
 Droplet temperature :                   280
 Gas inlet temperature :                 600
-Injection rate :                        100      ! Particles/sec
-Gas inlet velocity:                     0.25
-Gas inlet radius:                       1e-2
+Injection rate :                        1000  ! Particles/sec
+Gas inlet velocity:                     1
+Gas inlet radius:                       5e-3
+Gas coflow multiplier :                 0.08 ! v_coflow = v_inj*(Gas coflow multiplier)
 
 Fuel :                                  ethanol
 Fuel-gas Schmidt number:                1.5

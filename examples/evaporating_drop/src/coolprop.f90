@@ -10,5 +10,14 @@ module coolprop
          real(C_DOUBLE), value :: prop2
          character(kind=c_char), dimension(*) :: fluidname
       end function cprop
+!    end interface
+! end module coolprop
+   
+      function cprop_triv(fluidname,output) bind(C,name='Props1SI')
+         use iso_c_binding
+         real(C_DOUBLE) :: cprop_triv
+         character(KIND=c_char), dimension(*) :: fluidname
+         character(KIND=c_char), dimension(*) :: output
+      end function cprop_triv
    end interface
 end module coolprop

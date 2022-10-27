@@ -42,7 +42,7 @@ module simulation
    real(WP) :: diff_T,diff_Yf ! non-turbulent diffusivities for scalar solvers
 
    !> Case quantities
-   real(WP) :: dp,dp_sig,rp,rp_sig,u_inj,u_inj_sig,T_d,inj_rate,r_injG,v_injG,T_inj
+   real(WP) :: dp,dp_sig,rp,rp_sig,u_inj,u_inj_sig,T_d,inj_rate,r_injG,v_injG,T_inj,v_coflow
    integer :: nInj
 
    !> Quantities for flow & scalar solvers:
@@ -139,6 +139,16 @@ contains
       if (i.eq.pg%imin.and.(sqrt(pg%ym(j)**2+pg%zm(k)**2)).le.r_injG) isIn = .true.
    end function gas_inj_locator
 
+   function coflow_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (i.eq.pg%imin.and.(sqrt(pg%ym(j)**2+pg%zm(k)**2)).gt.r_injG) isIn = .true.
+   end function coflow_locator
+
       !> Define here our equation of state - rho(T,mass)
    subroutine get_rho()
       implicit none
@@ -154,9 +164,9 @@ contains
          do j=T_sc%cfg%jmino_,T_sc%cfg%jmaxo_
             do i=T_sc%cfg%imino_,T_sc%cfg%imaxo_
                if (Yf_sc%SC(i,j,k).ge.0.0_WP) then
-                  T_sc%rho(i,j,k)=p0/(R_cst*(Yf_sc%SC(i,j,k)/W_l+(1.0_WP-Yf_sc%SC(i,j,k))/W_g)*T_sc%SC(i,j,k)) + lp%srcM(i,j,k)
+                  T_sc%rho(i,j,k)=p0/(R_cst*(Yf_sc%SC(i,j,k)/W_l+(1.0_WP-Yf_sc%SC(i,j,k))/W_g)*T_sc%SC(i,j,k))! + lp%srcM(i,j,k)
                else
-                  T_sc%rho(i,j,k)=p0*W_g/(R_cst*T_sc%SC(i,j,k)) + lp%srcM(i,j,k)
+                  T_sc%rho(i,j,k)=p0*W_g/(R_cst*T_sc%SC(i,j,k))! + lp%srcM(i,j,k)
                end if
                Yf_sc%rho(i,j,k)=T_sc%rho(i,j,k)
             end do
@@ -176,98 +186,149 @@ contains
          time=timetracker(amRoot=cfg%amRoot)
          call param_read('Max timestep size',time%dtmax)
          call param_read('Max cfl number',time%cflmax)
+         call param_read('Max time',time%tmax)
          time%dt=time%dtmax
          time%itmax=2
       end block initialize_timetracker
       
       initialize_fluid_properties: block
          ! use messager, only : die
-         ! use fluidTable_class, only: mu_ID
-         integer :: i,j
+         use string,    only: str_medium
+         use fluidTable_class, only: Cp_ID,Lv_ID,Tb_ID,rho_ID,MW_ID,mu_ID
+         character(len=str_medium) :: name
+         integer :: i,j,nP,nT
          real(WP) :: Tmin,Tmax,Pmin,Pmax,dP,dT
          real(WP) :: testVal
 
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Liquid !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-         lTab%nP = 21
-         lTab%nT = 21
-         allocate(lTab%Cp(lTab%nT)); lTab%Cp = 0.0_WP
-         allocate(lTab%rho(lTab%nP,lTab%nT)); lTab%rho = 0.0_WP
-         allocate(lTab%L_v(lTab%nP)); lTab%L_v = 0.0_WP
-         allocate(lTab%T_b(lTab%nP)); lTab%T_b = 0.0_WP
-         allocate(lTab%T(lTab%nT)); lTab%T = 0.0_WP
-         allocate(lTab%P(lTab%nP)); lTab%P = 0.0_WP
-         allocate(lTab%mu(lTab%nP,lTab%nT)); lTab%mu = 0.0_WP
-
          call param_read('Pressure',p0)
-         call param_read('Fuel',lTab%name)
-         call param_read('Gas inlet temperature',T_inj);Tmax = T_inj
+         call param_read('Fuel',name)
+         call param_read('Gas inlet temperature',T_inj);
+         nP = 9; nT = 9 ! points on interpolation mesh
 
-         Pmin = p0/1.1_WP; Pmax = p0*1.1_WP
-         dP = (Pmax-Pmin)/(real(lTab%nP,WP)-1.0_WP)
+         lTab=fluidTable(name=name)
 
          Tmin = maxval([250.0_WP,1.01_WP*cprop(output='Tmin'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))]); 
-         Tmax = 0.99_WP*cprop(output='T'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))
-         dT = (Tmax-Tmin)/(real(lTab%nT,WP)-1.0_WP)
+         Tmax = 0.999_WP*cprop(output='T'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))
+         Pmin = p0/1.1_WP; Pmax = p0*1.1_WP
 
-         lTab%MW = cprop(output='M'//char(0),name1='T'//char(0),prop1=Tmin,name2='P'//char(0),prop2=p0,fluidname=trim(lTab%name)//char(0))
+         call lTab%initialize_fluidTable(Pmin=Pmin,Pmax=Pmax,Tmin=Tmin,Tmax=Tmax,nP=nP,nT=nT)
 
-         do i=1,lTab%nP
-            lTab%P(i) = Pmin+dP*(real(i,WP)-1.0_WP)
-            do j=1,lTab%nT
-               if (i.eq.1) then
-                  lTab%T(j) = Tmin+dT*(real(j,WP)-1.0_WP)
-                  lTab%Cp(j) = cprop(output='CPMASS'//char(0),name1='T'//char(0),prop1=lTab%T(j),name2='P'//char(0),prop2=p0,fluidname=trim(lTab%name)//char(0))
-               end if
-               lTab%rho(i,j) = cprop(output='D'//char(0),name1='T'//char(0),prop1=lTab%T(j),name2='P'//char(0),prop2=lTab%P(i),fluidname=trim(lTab%name)//char(0))
-               lTab%mu(i,j) = cprop(output='V'//char(0),name1='T'//char(0),prop1=lTab%T(j),name2='P'//char(0),prop2=lTab%P(i),fluidname=trim(lTab%name)//char(0))
+         call lTab%addProp(propID=Cp_ID)
+         call lTab%addProp(propID=Lv_ID)
+         call lTab%addProp(propID=Tb_ID)
+         call lTab%addProp(propID=rho_ID)
+         call lTab%addProp(propID=MW_ID)
+         call lTab%addProp(propID=mu_ID)
+         ! if (cfg%amroot) print*,lTab%Cp
+         ! if (cfg%amroot) print*,lTab%Lv
+         ! if (cfg%amroot) print*,lTab%Tb
+         ! if (cfg%amroot) print*,lTab%rho
+         ! if (cfg%amroot) print*,lTab%MW
+         ! if (cfg%amroot) print*,lTab%mu
 
-            end do
-            lTab%T_b(i) = cprop(output='T'//char(0),name1='P'//char(0),prop1=lTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))
-            lTab%L_v(i) = cprop(output='H'//char(0),name1='P'//char(0),prop1=lTab%P(i),name2='Q'//char(0),prop2=1.0_WP,fluidname=trim(lTab%name)//char(0)) - &
-                        cprop(output='H'//char(0),name1='P'//char(0),prop1=lTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0)) ! latent heat of vaporization
-         end do
 
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Gas !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-         gTab%nP = 11
-         gTab%nT = 11
-         allocate(gTab%Cp(gTab%nT)); gTab%Cp = 0.0_WP
-         allocate(gTab%rho(gTab%nP,gTab%nT)); gTab%rho = 0.0_WP
-         allocate(gTab%L_v(gTab%nP)); gTab%L_v = 0.0_WP
-         allocate(gTab%T_b(gTab%nP)); gTab%T_b = 0.0_WP
-         allocate(gTab%T(gTab%nT)); gTab%T = 0.0_WP
-         allocate(gTab%P(gTab%nP)); gTab%P = 0.0_WP
-         allocate(gTab%mu(gTab%nP,gTab%nT)); gTab%mu = 0.0_WP
+         ! lTab%nP = 21
+         ! lTab%nT = 21
+         ! allocate(lTab%Cp(lTab%nT)); lTab%Cp = 0.0_WP
+         ! allocate(lTab%rho(lTab%nP,lTab%nT)); lTab%rho = 0.0_WP
+         ! allocate(lTab%L_v(lTab%nP)); lTab%L_v = 0.0_WP
+         ! allocate(lTab%T_b(lTab%nP)); lTab%T_b = 0.0_WP
+         ! allocate(lTab%T(lTab%nT)); lTab%T = 0.0_WP
+         ! allocate(lTab%P(lTab%nP)); lTab%P = 0.0_WP
+         ! allocate(lTab%mu(lTab%nP,lTab%nT)); lTab%mu = 0.0_WP
+
+         ! call param_read('Pressure',p0)
+         ! call param_read('Fuel',lTab%name)
+         ! call param_read('Gas inlet temperature',T_inj);Tmax = T_inj
+
+         ! Pmin = p0/1.1_WP; Pmax = p0*1.1_WP
+         ! dP = (Pmax-Pmin)/(real(lTab%nP,WP)-1.0_WP)
+
+         ! Tmin = maxval([250.0_WP,1.01_WP*cprop(output='Tmin'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))]); 
+         ! Tmax = 0.99_WP*cprop(output='T'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))
+         ! dT = (Tmax-Tmin)/(real(lTab%nT,WP)-1.0_WP)
+
+         ! lTab%MW = cprop(output='M'//char(0),name1='T'//char(0),prop1=Tmin,name2='P'//char(0),prop2=p0,fluidname=trim(lTab%name)//char(0))
+
+         ! do i=1,lTab%nP
+         !    lTab%P(i) = Pmin+dP*(real(i,WP)-1.0_WP)
+         !    do j=1,lTab%nT
+         !       if (i.eq.1) then
+         !          lTab%T(j) = Tmin+dT*(real(j,WP)-1.0_WP)
+         !          lTab%Cp(j) = cprop(output='CPMASS'//char(0),name1='T'//char(0),prop1=lTab%T(j),name2='P'//char(0),prop2=p0,fluidname=trim(lTab%name)//char(0))
+         !       end if
+         !       lTab%rho(i,j) = cprop(output='D'//char(0),name1='T'//char(0),prop1=lTab%T(j),name2='P'//char(0),prop2=lTab%P(i),fluidname=trim(lTab%name)//char(0))
+         !       lTab%mu(i,j) =  cprop(output='V'//char(0),name1='T'//char(0),prop1=lTab%T(j),name2='P'//char(0),prop2=lTab%P(i),fluidname=trim(lTab%name)//char(0))
+
+         !    end do
+         !    lTab%T_b(i) = cprop(output='T'//char(0),name1='P'//char(0),prop1=lTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))
+         !    lTab%L_v(i) = cprop(output='H'//char(0),name1='P'//char(0),prop1=lTab%P(i),name2='Q'//char(0),prop2=1.0_WP,fluidname=trim(lTab%name)//char(0)) - &
+         !                cprop(output='H'//char(0),name1='P'//char(0),prop1=lTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0)) ! latent heat of vaporization
+         ! end do
+
+         ! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+         ! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Gas !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+         ! gTab%nP = 11
+         ! gTab%nT = 11
+         ! allocate(gTab%Cp(gTab%nT)); gTab%Cp = 0.0_WP
+         ! allocate(gTab%rho(gTab%nP,gTab%nT)); gTab%rho = 0.0_WP
+         ! allocate(gTab%L_v(gTab%nP)); gTab%L_v = 0.0_WP
+         ! allocate(gTab%T_b(gTab%nP)); gTab%T_b = 0.0_WP
+         ! allocate(gTab%T(gTab%nT)); gTab%T = 0.0_WP
+         ! allocate(gTab%P(gTab%nP)); gTab%P = 0.0_WP
+         ! allocate(gTab%mu(gTab%nP,gTab%nT)); gTab%mu = 0.0_WP
 
          call param_read('Pressure',p0)
-         call param_read('Gas',gTab%name)
-         call param_read('Gas inlet temperature',Tmax)
-         call param_read('Gas Prandtl number',gTab%Pr)
-         call param_read('Fuel-gas Schmidt number',gTab%Sc)
+         call param_read('Gas',name)
+         call param_read('Gas inlet temperature',T_inj)
+
+         gTab=fluidTable(name=name)
+
          Pmin = p0/1.1_WP; Pmax = p0*1.1_WP
          dP = (Pmax-Pmin)/(real(gTab%nP,WP)-1.0_WP)
 
          Tmin = maxval([250.0_WP,1.01_WP*cprop(output='Tmin'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))])
-         Tmax = Tmax*1.5
-         dT = (Tmax-Tmin)/(real(gTab%nT,WP)-1.0_WP)
+         Tmax = T_inj*1.5
 
-         gTab%MW = cprop(output='M'//char(0),name1='T'//char(0),prop1=Tmin,name2='P'//char(0),prop2=p0,fluidname=trim(gTab%name)//char(0))
+         call gTab%initialize_fluidTable(Pmin=Pmin,Pmax=Pmax,Tmin=Tmin,Tmax=Tmax,nP=nP,nT=nT)
 
-         do i=1,gTab%nP
-            gTab%P(i) = Pmin+dP*(real(i,WP)-1.0_WP)
-            do j=1,gTab%nT
-               if (i.eq.1) then
-                  gTab%T(j) = Tmin+dT*(real(j,WP)-1.0_WP)
-                  gTab%Cp(j)= cprop(output='CPMASS'//char(0),name1='T'//char(0),prop1=gTab%T(j),name2='P'//char(0),prop2=p0,fluidname=trim(gTab%name)//char(0))
-               end if
-               gTab%rho(i,j)= cprop(output='D'//char(0),name1='T'//char(0),prop1=gTab%T(j),name2='P'//char(0),prop2=gTab%P(i),fluidname=trim(gTab%name)//char(0))
-               gTab%mu(i,j) = cprop(output='V'//char(0),name1='T'//char(0),prop1=gTab%T(j),name2='P'//char(0),prop2=gTab%P(i),fluidname=trim(gTab%name)//char(0))
+         call gTab%addProp(propID=Cp_ID)
+         call gTab%addProp(propID=Lv_ID)
+         call gTab%addProp(propID=Tb_ID)
+         call gTab%addProp(propID=rho_ID)
+         call gTab%addProp(propID=MW_ID)
+         call gTab%addProp(propID=mu_ID)
+         ! if (cfg%amroot) print*,gTab%Cp
+         ! if (cfg%amroot) print*,gTab%Lv
+         ! if (cfg%amroot) print*,gTab%Tb
+         ! if (cfg%amroot) print*,gTab%rho
+         ! if (cfg%amroot) print*,gTab%MW
+         ! if (cfg%amroot) print*,gTab%mu
 
-            end do
-            gTab%T_b(i) = cprop(output='T'//char(0),name1='P'//char(0),prop1=gTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(gTab%name)//char(0))
-            gTab%L_v(i) = cprop(output='H'//char(0),name1='P'//char(0),prop1=gTab%P(i),name2='Q'//char(0),prop2=1.0_WP,fluidname=trim(gTab%name)//char(0)) - &
-                          cprop(output='H'//char(0),name1='P'//char(0),prop1=gTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(gTab%name)//char(0)) ! latent heat of vaporization
-         end do
+         call param_read('Gas Prandtl number',gTab%Pr)
+         call param_read('Fuel-gas Schmidt number',gTab%Sc)
+
+         
+         ! dT = (Tmax-Tmin)/(real(gTab%nT,WP)-1.0_WP)
+
+         ! gTab%MW = cprop(output='M'//char(0),name1='T'//char(0),prop1=Tmin,name2='P'//char(0),prop2=p0,fluidname=trim(gTab%name)//char(0))
+
+         ! do i=1,gTab%nP
+         !    gTab%P(i) = Pmin+dP*(real(i,WP)-1.0_WP)
+         !    do j=1,gTab%nT
+         !       if (i.eq.1) then
+         !          gTab%T(j) = Tmin+dT*(real(j,WP)-1.0_WP)
+         !          gTab%Cp(j)= cprop(output='CPMASS'//char(0),name1='T'//char(0),prop1=gTab%T(j),name2='P'//char(0),prop2=p0,fluidname=trim(gTab%name)//char(0))
+         !       end if
+         !       gTab%rho(i,j)= cprop(output='D'//char(0),name1='T'//char(0),prop1=gTab%T(j),name2='P'//char(0),prop2=gTab%P(i),fluidname=trim(gTab%name)//char(0))
+         !       gTab%mu(i,j) = cprop(output='V'//char(0),name1='T'//char(0),prop1=gTab%T(j),name2='P'//char(0),prop2=gTab%P(i),fluidname=trim(gTab%name)//char(0))
+
+         !    end do
+         !    gTab%T_b(i) = cprop(output='T'//char(0),name1='P'//char(0),prop1=gTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(gTab%name)//char(0))
+         !    gTab%L_v(i) = cprop(output='H'//char(0),name1='P'//char(0),prop1=gTab%P(i),name2='Q'//char(0),prop2=1.0_WP,fluidname=trim(gTab%name)//char(0)) - &
+         !                  cprop(output='H'//char(0),name1='P'//char(0),prop1=gTab%P(i),name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(gTab%name)//char(0)) ! latent heat of vaporization
+         ! end do
          ! print*,'Tmin',Tmin,'Tmax',Tmax,'nT',lTab%nT,'Pmin',Pmin,'Pmax',Pmax,'nP',lTab%nP
          ! print*,'max(mu)',maxval(gTab%mu),'min(mu)',minval(gTab%mu)
          ! call gTab%evalProps(propOut=testVal,T_q=280.0_WP,P_q=p0,propID=mu_ID)
@@ -295,6 +356,7 @@ contains
          call param_read('Injection rate',inj_rate)
          call param_read('Gas inlet radius',r_injG)
          call param_read('Gas inlet velocity',v_injG)
+         call param_read('Gas coflow multiplier',v_coflow); v_coflow=v_coflow*v_injG
          ! Get droplet initial temperature
          call param_read('Droplet temperature',T_d)
          ! Get droplet density from the fluid table
@@ -386,18 +448,21 @@ contains
          ! Create bconds
          ! call T_sc%add_bcond(name='bc_xm',type=neumann,dir='xm',locator=xm_locator)
          ! call T_sc%add_bcond(name='chop_out',type=dirichlet,dir='xp',locator=xp_sc_locator)
-         call T_sc%add_bcond(name='T_out',type=neumann,  dir='xp',locator=xp_sc_locator)
-         call T_sc%add_bcond(name='T_ym', type=neumann,  dir='ym',locator=ym_sc_locator)
-         call T_sc%add_bcond(name='T_yp', type=neumann,  dir='yp',locator=yp_sc_locator)
-         call T_sc%add_bcond(name='T_zm', type=neumann,  dir='zm',locator=zm_sc_locator)
-         call T_sc%add_bcond(name='T_zp', type=neumann,  dir='zp',locator=zp_sc_locator)
-         call T_sc%add_bcond(name='gas_inj', type=dirichlet,dir='xm',locator=gas_inj_locator)
-         call Yf_sc%add_bcond(name='Yf_out', type=neumann, dir='xp',locator=xp_sc_locator)
-         call Yf_sc%add_bcond(name='Yf_ym', type=neumann,  dir='ym',locator=ym_sc_locator)
-         call Yf_sc%add_bcond(name='Yf_yp', type=neumann,  dir='yp',locator=yp_sc_locator)
-         call Yf_sc%add_bcond(name='Yf_zm', type=neumann,  dir='zm',locator=zm_sc_locator)
-         call Yf_sc%add_bcond(name='Yf_zp', type=neumann,  dir='zp',locator=zp_sc_locator)
-         call Yf_sc%add_bcond(name='gas_inj',type=dirichlet,dir='xm',locator=gas_inj_locator)
+         call T_sc%add_bcond(name='T_out',   type=neumann,  dir='xp',locator=xp_sc_locator)
+         call T_sc%add_bcond(name='T_ym',    type=neumann,  dir='ym',locator=ym_sc_locator)
+         call T_sc%add_bcond(name='T_yp',    type=neumann,  dir='yp',locator=yp_sc_locator)
+         call T_sc%add_bcond(name='T_zm',    type=neumann,  dir='zm',locator=zm_sc_locator)
+         call T_sc%add_bcond(name='T_zp',    type=neumann,  dir='zp',locator=zp_sc_locator)
+         call T_sc%add_bcond(name='T_inj',   type=dirichlet,dir='xm',locator=gas_inj_locator)
+         call T_sc%add_bcond(name='T_coflow',type=dirichlet,dir='xm',locator=coflow_locator)
+
+         call Yf_sc%add_bcond(name='Yf_out',   type=neumann, dir='xp',locator=xp_sc_locator)
+         call Yf_sc%add_bcond(name='Yf_ym',    type=neumann,  dir='ym',locator=ym_sc_locator)
+         call Yf_sc%add_bcond(name='Yf_yp',    type=neumann,  dir='yp',locator=yp_sc_locator)
+         call Yf_sc%add_bcond(name='Yf_zm',    type=neumann,  dir='zm',locator=zm_sc_locator)
+         call Yf_sc%add_bcond(name='Yf_zp',    type=neumann,  dir='zp',locator=zp_sc_locator)
+         call Yf_sc%add_bcond(name='Yf_inj',   type=dirichlet,dir='xm',locator=gas_inj_locator)
+         call Yf_sc%add_bcond(name='Yf_coflow',type=dirichlet,dir='xm',locator=coflow_locator)
          ! call Yf_sc%add_bcond(name='chop_out',type=dirichlet,dir='xp',locator=xp_sc_locator)
          ! call Yf_sc%add_bcond(name='bc_xm', type=neumann,  dir='xm',locator=xm_locator)
 
@@ -428,9 +493,11 @@ contains
          real(WP) :: rhof,viscf,T_in,viscf2
          fs=lowmach(cfg=cfg,name='Variable density low Mach NS')
          ! Setup bconds
-         ! call fs%add_bcond(name='bc_xm',type=neumann,face='x',dir=-1,caanCorrect=.true.,locator=xm_locator)
-         call fs%add_bcond(name='bc_xp',type=clipped_neumann,face='x',dir=+1,canCorrect=.true.,locator=xp_locator)
-         call fs%add_bcond(name='gas_inj',type=dirichlet,face='x',dir=-1,canCorrect=.false.,locator=gas_inj_locator)
+         ! call fs%add_bcond(name='bc_xm',type=neumann,face='x',dir=-1,canCorrect=.true.,locator=xm_locator)
+         call fs%add_bcond(name='bc_xp',    type=clipped_neumann,face='x',dir=+1,canCorrect=.true., locator=xp_locator)
+         call fs%add_bcond(name='gas_inj',  type=dirichlet,      face='x',dir=-1,canCorrect=.false.,locator=gas_inj_locator)
+         call fs%add_bcond(name='gas_coflow',type=dirichlet,      face='x',dir=-1,canCorrect=.false.,locator=coflow_locator)
+
          ! Set initial density, viscosity
          fs%rho = Yf_sc%rho ! Take density from scalar solver
          call param_read('Gas inlet temperature',T_in)
@@ -459,6 +526,12 @@ contains
             i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
             fs%rhoU(i,j,k)=v_injG*fs%rho(i,j,k)
             fs%U(i,j,k)   =v_injG
+         end do
+         call fs%get_bcond('gas_coflow',mybc)
+         do n=1,mybc%itr%no_
+            i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+            fs%rhoU(i,j,k)=v_coflow*fs%rho(i,j,k)
+            fs%U(i,j,k)   =v_coflow
          end do
          call fs%apply_bcond(time%t,time%dt)
          call T_sc%get_drhodt(drhodt=resT,dt=time%dt) ! use resT to hold our drhodt :)
@@ -613,7 +686,7 @@ contains
          
          ! Apply time-varying Dirichlet conditions
          ! This is where time-dpt Dirichlet would be enforced
-         ! print*,'here0'
+         print*,'here0'
          ! Perform sub-iterations
          do while (time%it.le.time%itmax)
             
@@ -625,12 +698,18 @@ contains
             ! Explicit calculation of drhoSC/dt from scalar equation
             call T_sc%get_drhoSCdt(resT,fs%rhoU,fs%rhoV,fs%rhoW)
             call Yf_sc%get_drhoSCdt(resYf,fs%rhoU,fs%rhoV,fs%rhoW)
-            ! print*,'here0A',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            print*,'here0A',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
 
             ! Assemble explicit residual            
             resT=time%dt*resT-(2.0_WP*T_sc%rho*T_sc%SC-(T_sc%rho+T_sc%rhoold)*T_sc%SCold)
             resYf=time%dt*resYf-(2.0_WP*Yf_sc%rho*Yf_sc%SC-(Yf_sc%rho+Yf_sc%rhoold)*Yf_sc%SCold)
-            
+            ! print_res : block
+            !    use messager, only : die
+            !    print*,resT
+            !    print*,''
+            !    print*,resYf 
+            !    call die('end')  
+            ! end block print_res
             ! Add mass, energy source terms
             add_mass_energy_src: block
                use fluidTable_class, only: Cp_ID
@@ -647,11 +726,11 @@ contains
                   end do
                end do
             end block add_mass_energy_src
-
+            print*,'here0B'
             ! Form implicit residual
             call T_sc%solve_implicit(time%dt,resT,fs%rhoU,fs%rhoV,fs%rhoW)
             call Yf_sc%solve_implicit(time%dt,resYf,fs%rhoU,fs%rhoV,fs%rhoW)
-            ! print*,'here0B',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            print*,'here0C',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Apply this residual
             T_sc%SC=2.0_WP*T_sc%SC-T_sc%SCold+resT
             Yf_sc%SC=2.0_WP*Yf_sc%SC-Yf_sc%SCold+resYf
@@ -667,32 +746,37 @@ contains
             !    end do
             ! end block clip_Yf
 
-            ! print*,'max rho2',maxval(Yf_sc%rho)
+            print*,'max rho2',maxval(Yf_sc%rho)
             
             ! Apply other boundary conditions on the resulting field
             scalar_dirichlet : block
                use vdscalar_class, only: bcond
                type(bcond),pointer::mybc
                integer :: i,j,k,n
-               call T_sc%get_bcond('gas_inj',mybc)
+               real(WP) :: R_cst
+               R_cst = 8.314472_WP
+               call T_sc%get_bcond('T_inj',mybc)
                do n=1,mybc%itr%no_
                   i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  T_sc%rho(i,j,k)=p0*gTab%MW/(R_cst*T_inj)
+                  Yf_sc%rho(i,j,k)=T_sc%rho(i,j,k)
+                  T_sc%SC(i,j,k) =T_inj;  T_sc%rhoSC(i,j,k) =T_inj*T_sc%rho(i,j,k)
+                  Yf_sc%SC(i,j,k)=0.0_WP; Yf_sc%rhoSC(i,j,k)=0.0_WP
+               end do  
+               
+               call T_sc%get_bcond('T_coflow',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  T_sc%rho(i,j,k)=p0*gTab%MW/(R_cst*T_inj)
+                  Yf_sc%rho(i,j,k)=T_sc%rho(i,j,k)
                   T_sc%SC(i,j,k) =T_inj;  T_sc%rhoSC(i,j,k) =T_inj*T_sc%rho(i,j,k)
                   Yf_sc%SC(i,j,k)=0.0_WP; Yf_sc%rhoSC(i,j,k)=0.0_WP
                end do  
 
-               ! ! very very very very janky exit boundary condition.... should implement clipped neumann....
-               ! call T_sc%get_bcond('chop_out',mybc)
-               ! do n=1,mybc%itr%no_
-               !    i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-               !    T_sc%SC(i,j,k) =T_inj;  T_sc%rhoSC(i,j,k) =T_inj*T_sc%rho(i,j,k)
-               !    Yf_sc%SC(i,j,k)=0.0_WP; Yf_sc%rhoSC(i,j,k)=0.0_WP
-               ! end do  
-
             end block scalar_dirichlet
             call T_sc%apply_bcond(time%t,time%dt)
             call Yf_sc%apply_bcond(time%t,time%dt)
-            ! print*,'here0C',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            print*,'here0D',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! print*,'max rho3',maxval(Yf_sc%rho)
             ! ===================================================
             
@@ -705,7 +789,7 @@ contains
             call get_rho()
             T_sc%rho = T_sc%rho+lp%srcM
             Yf_sc%rho = Yf_sc%rho+lp%srcM
-            ! print*,'here0D',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            print*,'here0E',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Rescale scalar for conservation
             ! T_sc%SC=resT/T_sc%rho
             ! Yf_sc%SC=resYf/Yf_sc%rho
@@ -714,10 +798,14 @@ contains
             update_visc_sgs: block
                use fluidTable_class, only: mu_ID
                integer :: i,j,k
+               real(WP) :: Sc_t ! Turbulent schmidt number
                ! Get the turbulent viscosity
                call fs%interp_vel(Ui,Vi,Wi)
                call fs%get_strainrate(Ui=Ui,Vi=Vi,Wi=Wi,SR=SR)
                call sgs%get_visc(dt=time%dtold,rho=T_sc%rho,Ui=Ui,Vi=Vi,Wi=Wi,SR=SR)
+
+               Sc_t = 1.2 ! from Li, et al. "Numerical and experimental investigation of turbulent n-heptane jet-in-hot-coflow flames." Fuel 283 (2021)
+
                ! Loop some things
                do k=fs%cfg%kmin_,fs%cfg%kmax_
                   do j=fs%cfg%jmin_,fs%cfg%jmax_
@@ -728,7 +816,7 @@ contains
                         fs%visc(i,j,k) = fs%visc(i,j,k) + sgs%visc(i,j,k)
             ! UPDATE THE DIFFUSIVITY
                         T_sc%diff(i,j,k) = diff_T +sgs%visc(i,j,k)/ T_sc%rho(i,j,k)
-                        Yf_sc%diff(i,j,k)= diff_Yf+sgs%visc(i,j,k)/Yf_sc%rho(i,j,k)
+                        Yf_sc%diff(i,j,k)= diff_Yf+sgs%visc(i,j,k)/(Yf_sc%rho(i,j,k)*Sc_t)
                      end do
                   end do
                end do
@@ -812,8 +900,17 @@ contains
                   fs%rhoU(i,j,k)=v_injG*fs%rho(i,j,k)
                   fs%U(i,j,k)   =v_injG
                   fs%V(i,j,k)   =0.0_WP; fs%W(i,j,k)=0.0_WP
-                  fs%rhoV(i,j,k) = 0.0_WP;fs%rhoW(i,j,k)=0.0_WP
+                  fs%rhoV(i,j,k)=0.0_WP; fs%rhoW(i,j,k)=0.0_WP
                end do               
+               call fs%get_bcond('gas_coflow',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  fs%rhoU(i,j,k)=v_coflow*fs%rho(i,j,k)
+                  fs%U(i,j,k)   =v_coflow
+                  fs%V(i,j,k)   =0.0_WP; fs%W(i,j,k)=0.0_WP
+                  fs%rhoV(i,j,k)=0.0_WP; fs%rhoW(i,j,k)=0.0_WP
+               end do  
+
             end block apply_dirichlet
 
             ! Solve Poisson equation
@@ -860,8 +957,13 @@ contains
                   ! Set the temperature 
                   lp%p(np)%T_d = T_d
                   ! Assign position in center of domain
-                  theta = random_uniform(0.0_WP,twoPi)
-                  lp%p(np)%pos = random_normal(rp,rp_sig)*[0.0_WP,cos(theta),sin(theta)]
+                  if (cfg%ny.gt.1) then
+                     theta = random_uniform(0.0_WP,twoPi)
+                     lp%p(np)%pos = random_normal(rp,rp_sig)*[0.0_WP,cos(theta),sin(theta)]
+                  else
+                     theta = 2.0_WP*floor(random_uniform(0.0_WP,2.0_WP))-1.0_WP ! Use theta as either -1 or 1
+                     lp%p(np)%pos = random_normal(rp,rp_sig)*[0.0_WP,0.0_WP,theta]
+                  end if
                   ! Give zero velocity
                   lp%p(np)%vel=[random_normal(u_inj,u_inj_sig),0.0_WP,0.0_WP]
                   ! Give zero collision force
