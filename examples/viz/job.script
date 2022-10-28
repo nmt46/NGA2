@@ -1,0 +1,11 @@
+#!/bin/bash
+#SBATCH -p viz
+#SBATCH -t 24:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=12
+#SBATCH --cpus-per-task=2
+#SBATCH -J viz
+#SBATCH --mail-user=nmt46@cornell.edu
+
+
+mpirun /opt/ohpc/pub/apps/paraview/5.10.1/bin/pvserver --sp 10793

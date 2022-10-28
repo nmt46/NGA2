@@ -49,3 +49,4 @@ examples/*/input*~
 !examples/nozzle_internal/cad
 !examples/nozzle_2phase/cad
 !examples/nozzle_2grids/cad
+!examples/viz/job.script
