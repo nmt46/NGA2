@@ -606,6 +606,7 @@ contains
          call mfile%add_column(time%wt,'wall_t')
          call mfile%add_column(time%t,'time')
          call mfile%add_column(time%dt,'dt')
+         call mfile%add_column(time%cfl,'CFL')
          call mfile%add_column(fs%Umax,'FS_Max_U')
          call mfile%add_column(fs%Vmax,'FS_Max_V')
          ! call mfile%add_column(fs%Wmax,'FS_Max_W')
@@ -686,7 +687,7 @@ contains
          
          ! Apply time-varying Dirichlet conditions
          ! This is where time-dpt Dirichlet would be enforced
-         print*,'here0'
+         ! print*,'here0'
          ! Perform sub-iterations
          do while (time%it.le.time%itmax)
             
@@ -698,16 +699,16 @@ contains
             ! Explicit calculation of drhoSC/dt from scalar equation
             call T_sc%get_drhoSCdt(resT,fs%rhoU,fs%rhoV,fs%rhoW)
             call Yf_sc%get_drhoSCdt(resYf,fs%rhoU,fs%rhoV,fs%rhoW)
-            print*,'here0A',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0A',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
 
             ! Assemble explicit residual            
             resT=time%dt*resT-(2.0_WP*T_sc%rho*T_sc%SC-(T_sc%rho+T_sc%rhoold)*T_sc%SCold)
             resYf=time%dt*resYf-(2.0_WP*Yf_sc%rho*Yf_sc%SC-(Yf_sc%rho+Yf_sc%rhoold)*Yf_sc%SCold)
             ! print_res : block
             !    use messager, only : die
-            !    print*,resT
-            !    print*,''
-            !    print*,resYf 
+            !    ! print*,resT
+            !    ! print*,''
+            !    ! print*,resYf 
             !    call die('end')  
             ! end block print_res
             ! Add mass, energy source terms
@@ -726,11 +727,11 @@ contains
                   end do
                end do
             end block add_mass_energy_src
-            print*,'here0B'
+            ! print*,'here0B'
             ! Form implicit residual
             call T_sc%solve_implicit(time%dt,resT,fs%rhoU,fs%rhoV,fs%rhoW)
             call Yf_sc%solve_implicit(time%dt,resYf,fs%rhoU,fs%rhoV,fs%rhoW)
-            print*,'here0C',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0C',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Apply this residual
             T_sc%SC=2.0_WP*T_sc%SC-T_sc%SCold+resT
             Yf_sc%SC=2.0_WP*Yf_sc%SC-Yf_sc%SCold+resYf
@@ -746,7 +747,7 @@ contains
             !    end do
             ! end block clip_Yf
 
-            print*,'max rho2',maxval(Yf_sc%rho)
+            ! print*,'max rho2',maxval(Yf_sc%rho)
             
             ! Apply other boundary conditions on the resulting field
             scalar_dirichlet : block
@@ -776,7 +777,7 @@ contains
             end block scalar_dirichlet
             call T_sc%apply_bcond(time%t,time%dt)
             call Yf_sc%apply_bcond(time%t,time%dt)
-            print*,'here0D',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0D',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! print*,'max rho3',maxval(Yf_sc%rho)
             ! ===================================================
             
@@ -789,7 +790,7 @@ contains
             call get_rho()
             T_sc%rho = T_sc%rho+lp%srcM
             Yf_sc%rho = Yf_sc%rho+lp%srcM
-            print*,'here0E',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0E',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Rescale scalar for conservation
             ! T_sc%SC=resT/T_sc%rho
             ! Yf_sc%SC=resYf/Yf_sc%rho
@@ -855,7 +856,7 @@ contains
             
             ! Explicit calculation of drho*u/dt from NS
             call fs%get_dmomdt(resU,resV,resW)
-            ! print*,'here0E',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0F',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             
             ! Assemble explicit residual
             resU=time%dtmid*resU-(2.0_WP*fs%rhoU-2.0_WP*fs%rhoUold)
@@ -874,10 +875,10 @@ contains
                   end do
                end do
             end block add_lpt_src
-            ! print*,'here0F',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0G',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Form implicit residuals
             call fs%solve_implicit(time%dtmid,resU,resV,resW)
-            ! print*,'here0G',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
+            ! print*,'here0H',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
             ! print*,'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
             ! Apply these residuals
             fs%U=2.0_WP*fs%U-fs%Uold+resU
@@ -888,7 +889,7 @@ contains
             call fs%apply_bcond(time%tmid,time%dtmid)
             call fs%rho_multiply()
             call fs%apply_bcond(time%tmid,time%dtmid)
-            ! print*,'here0H',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
+            ! print*,'here0I',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
             ! This is where dirichlet BCs would go
             apply_dirichlet : block
                use lowmach_class, only: bcond
@@ -921,21 +922,21 @@ contains
             fs%psolv%sol=0.0_WP
             call fs%psolv%solve()
             call fs%shift_p(fs%psolv%sol)
-            ! print*,'here0I',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
+            ! print*,'here0J',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
             ! Correct momentum and rebuild velocity
             call fs%get_pgrad(fs%psolv%sol,resU,resV,resW)
-            ! print*,'here0J',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
-            fs%P=fs%P+fs%psolv%sol
             ! print*,'here0K',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
+            fs%P=fs%P+fs%psolv%sol
+            ! print*,'here0L',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W)),'rhoU',maxval(fs%rhoU),'resU',maxval(resU)
             ! print*,'rhoU',maxval(fs%rhoU),'resU',maxval(resU),'dt*res',maxval(-time%dtmid*resU)
             fs%rhoU=fs%rhoU-time%dtmid*resU
             fs%rhoV=fs%rhoV-time%dtmid*resV
             fs%rhoW=fs%rhoW-time%dtmid*resW
             
-            ! print*,'here0L',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0M',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             call fs%rho_divide
             ! ===================================================
-            ! print*,'here0M',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
+            ! print*,'here0N',time%it,max(maxval(fs%U),maxval(fs%V),maxval(fs%W))
             ! Increment sub-iteration counter
             time%it=time%it+1
          end do

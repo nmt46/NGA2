@@ -1,13 +1,13 @@
 # Parallelization
-Partition : 4 1 1
+Partition : 8 1 1
 
 # Mesh definition
-Lx :  5e-2
+Lx :  20e-2
 Ly :  5e-2
 Lz :  5e-2 !6.25e-4!
-nx :  8
-ny :  1
-nz :  8
+nx :  64
+ny :  16
+nz :  16
 
 # Case definition
 Droplet mean diameter :                 250e-6
@@ -33,7 +33,7 @@ Thermal diffusivity :                   2e-5 ! from engineeringtoolbox; [m^2/s]
 Fuel diffusivity :                      11e-6 !http://webserver.dmt.upm.es/~isidoro/dat1/Mass%20diffusivity%20data.pdf
 
 # Time integration
-Max timestep size : 0.01
+Max timestep size : 0.003
 Max cfl number :    0.8
 Max time :          10
 Max temperature change : 10 ! the maximum allowable temperature change per time step [K/timeStep]
