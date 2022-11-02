@@ -88,6 +88,7 @@ module lpt_class
       real(WP) :: Vmin,Vmax,Vmean,Vvar                    !< V velocity info
       real(WP) :: Wmin,Wmax,Wmean,Wvar                    !< W velocity info
       real(WP) :: Tmin,Tmax,Tmean,Tvar                    !< Temperature info
+      real(WP) :: dtMin,dtMax
       integer  :: np_new,np_out                           !< Number of new and removed particles
       real(WP) :: Xmax,Xmin                               !< Max/min x-position of particles
       
@@ -810,11 +811,13 @@ contains
          ! else
          !    scale_tau = 5.0_WP
          ! end if
-         if (p%T_d.ge.(T_b*0.9_WP)) then
-            scale_tau = T_b/(10.0_WP*abs(T_b-p%T_d+epsilon(1.0_WP)))
-         else
-            scale_tau = 1.0_WP
-         end if
+         ! if (p%T_d.ge.(T_b*0.9_WP)) then
+         scale_tau = max(min(T_b/(10.0_WP*abs(T_b-p%T_d+epsilon(1.0_WP))),50.0_WP),1.0_WP)
+            ! Reduce timestep as temperature approaches boiling, though only to a point!
+            ! (getting permanently stuck in a while loop isn't the most fun :) )
+         ! else
+         !    scale_tau = 1.0_WP
+         ! end if
          ! print*,'rank',this%cfg%rank,'T_d',p%T_d,'T_b',T_b,'scaling',scale_tau
          ! Determine optimal time (inertial, thermal, mass loss)
          tau_acc = abs(tau)/real(this%nstep,WP)
@@ -935,6 +938,7 @@ contains
       this%Wmin=huge(1.0_WP); this%Wmax=-huge(1.0_WP); this%Wmean=0.0_WP
       this%Xmin=huge(1.0_WP); this%Xmax=-huge(1.0_WP)
       this%Tmin=huge(1.0_WP); this%Tmax=-huge(1.0_WP); this%Tmean=0.0_WP
+      this%dtMin=huge(1.0_WP);this%dtMax=-huge(1.0_WP)
       do i=1,this%np_
          this%dmin=min(this%dmin,this%p(i)%d     ); this%dmax=max(this%dmax,this%p(i)%d     ); this%dmean=this%dmean+this%p(i)%d
          this%Umin=min(this%Umin,this%p(i)%vel(1)); this%Umax=max(this%Umax,this%p(i)%vel(1)); this%Umean=this%Umean+this%p(i)%vel(1)
@@ -942,6 +946,7 @@ contains
          this%Wmin=min(this%Wmin,this%p(i)%vel(3)); this%Wmax=max(this%Wmax,this%p(i)%vel(3)); this%Wmean=this%Wmean+this%p(i)%vel(3)
          this%Xmin=min(this%Xmin,this%p(i)%pos(1)); this%Xmax=max(this%Xmax,this%p(i)%pos(1));
          this%Tmin=min(this%Tmin,this%p(i)%T_d   ); this%Tmax=max(this%Tmax,this%p(i)%T_d   ); this%Tmean=this%Tmean+this%p(i)%T_d
+         this%dtMin=min(this%dtMin,this%p(i)%dt);   this%dtMax=max(this%dtMax,this%p(i)%dt)
       end do
       call MPI_ALLREDUCE(this%dmin ,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%dmin =buf
       call MPI_ALLREDUCE(this%dmax ,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%dmax =buf
@@ -959,6 +964,8 @@ contains
       call MPI_ALLREDUCE(this%Tmax ,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%Tmax =buf
       call MPI_ALLREDUCE(this%Tmean,buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%Tmean=buf/safe_np
 
+      call MPI_ALLREDUCE(this%dtMin ,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%dtMin =buf
+      call MPI_ALLREDUCE(this%dtMax ,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%dtMax =buf
       call MPI_ALLREDUCE(this%Xmax,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%Xmax=buf
       call MPI_ALLREDUCE(this%Xmin,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%Xmin=buf
       call MPI_ALLREDUCE(real(this%nEvap_,WP),buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%nEvap=buf

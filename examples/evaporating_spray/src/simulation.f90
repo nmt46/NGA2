@@ -183,11 +183,14 @@ contains
       
       ! Initialize time tracker with 1 subiterations
       initialize_timetracker: block
+         real(WP) :: v_inj
          time=timetracker(amRoot=cfg%amRoot)
          call param_read('Max timestep size',time%dtmax)
          call param_read('Max cfl number',time%cflmax)
          call param_read('Max time',time%tmax)
-         time%dt=time%dtmax
+         call param_read('Gas inlet velocity',v_inj)
+         time%dt=0.1_WP*cfg%dx(1)/v_inj
+         ! time%dt=time%dtmax
          time%itmax=2
       end block initialize_timetracker
       
@@ -435,7 +438,7 @@ contains
       
       ! Initialize scalar solvers
       initialize_sc: block
-         use ils_class,      only: gmres
+         use ils_class,      only: gmres_amg,gmres
          use vdscalar_class, only: neumann,dirichlet
          real(WP) :: T_in
          ! create the scalar solvers for temperature and fuel mass fraction
@@ -467,8 +470,8 @@ contains
          ! call Yf_sc%add_bcond(name='bc_xm', type=neumann,  dir='xm',locator=xm_locator)
 
          ! Setup the solver
-         call T_sc%setup(implicit_ils=gmres)
-         call Yf_sc%setup(implicit_ils=gmres)
+         call T_sc%setup(implicit_ils=gmres_amg)
+         call Yf_sc%setup(implicit_ils=gmres_amg)
          ! Set initial field values
          call param_read('Gas inlet temperature',T_in)
          T_sc%SC=T_in
@@ -480,6 +483,7 @@ contains
          T_sc%diff = diff_T
          Yf_sc%diff = diff_Yf
          call param_read('Max temperature change',maxTemp_dt)
+         ! print*,'minRho',minval(T_sc%rho)
       end block initialize_sc
 
       ! Initialize the flow solver
@@ -619,12 +623,12 @@ contains
          call mfile%add_column(lp%nEvap,'N_evap')
          ! call mfile%add_column(lp%VFmean,'Mean_VF')
          ! call mfile%add_column(lp%Umin,'P_Umin')
-            call mfile%add_column(lp%Umean,'P_Umean')
+         call mfile%add_column(lp%Umean,'P_Umean')
          ! call mfile%add_column(lp%Xmin,'P_Xmin')
          ! call mfile%add_column(lp%Xmax,'P_Xmax')
-            call mfile%add_column(lp%Umax,'P_Umax')
-            call mfile%add_column(lp%dmean,'P_dmean')
-            call mfile%add_column(lp%Tmean,'P_Tmean')
+         call mfile%add_column(lp%Umax,'P_Umax')
+         call mfile%add_column(lp%dmean,'P_dmean')
+         call mfile%add_column(lp%Tmean,'P_Tmean')
          call mfile%add_column(lp%Tmax,'P_Tmax')
          ! call mfile%add_column(Bm_debug,'Spalding')
          call mfile%write()
