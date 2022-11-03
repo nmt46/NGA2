@@ -490,7 +490,7 @@ contains
 
    
    !> Advance the particle equations by a specified time step dt
-   subroutine advance(this,dt,U,V,W,rho,visc,T,Yf,Bm_debug,lTab,gTab,p_therm)
+   subroutine advance(this,dt,U,V,W,rho,visc,T,Yf,lTab,gTab,p_therm)
       use mathtools, only: Pi
       use messager, only: die
       use fluidTable_class, only: fluidTable
@@ -515,7 +515,6 @@ contains
       real(WP) :: dm,dE ! mass,energy change (pure mass,energy units) from beginning to end of time step
       logical :: notEvap
 
-      real(WP)::Bm_debug
       
       ! Zero out source term arrays
       this%srcU=0.0_WP
@@ -546,7 +545,7 @@ contains
             m_old = m_d ! store old mass
             ! Advance with Euler prediction
             call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),Tdot=Tdot,Mdot=Mdot,acc=acc,opt_dt=this%p(i)%dt,&
-               Bm_debug=Bm_debug,lTab=lTab,gTab=gTab,p_therm=p_therm)
+               lTab=lTab,gTab=gTab,p_therm=p_therm)
             ! print*,'rank',this%cfg%rank,'advanceHere2'
             ! Advance pos, vel 1st half
             this%p(i)%pos=pold%pos+0.5_WP*mydt*this%p(i)%vel
@@ -563,7 +562,7 @@ contains
             ! Correct with midpoint rule
             ! print*,'rank',this%cfg%rank,'advanceHere5'
             call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=this%p(i)%dt,&
-               Bm_debug=Bm_debug,lTab=lTab,gTab=gTab,p_therm=p_therm)
+               lTab=lTab,gTab=gTab,p_therm=p_therm)
             ! print*,'rank',this%cfg%rank,'advanceHere6'
             !   if (this%cfg%rank.eq.0) print*,'here2',i
             ! Advance pos, vel
@@ -661,7 +660,7 @@ contains
    
    
    !> Calculate RHS of the particle ODEs
-   subroutine get_rhs(this,U,V,W,rho,visc,T,Yf,p,acc,Tdot,Mdot,opt_dt,Bm_debug,lTab,gTab,p_therm)
+   subroutine get_rhs(this,U,V,W,rho,visc,T,Yf,p,acc,Tdot,Mdot,opt_dt,lTab,gTab,p_therm)
       use mathtools, only: Pi
       use messager, only: die
       use fluidTable_class, only: fluidTable,mu_ID
@@ -684,7 +683,6 @@ contains
       real(WP) :: Re,corr,tau,b1,b2
       real(WP) :: fvisc,frho,pVF,fVF
       real(WP), dimension(3) :: fvel
-      real(WP),optional :: Bm_debug
       ! if (this%cfg%rank.eq.0) print*,'RHS0'
       ! print*,'rank',this%cfg%rank,'RHS0'
       ! Interpolate the fluid phase velocity to the particle location
@@ -759,7 +757,6 @@ contains
          if (Yf_g.lt.0.0_WP) Yf_g = 0.0_WP ! Clip away negative Yf noise
          ! Spalding number
          Bm = (Yf_s-Yf_g)/(1.0_WP-Yf_s)
-         Bm_debug = Bm
          if (Yf_g.gt.maxval(Yf)*30.0_WP) then
             print*,'Warning, Yf_g artificially high. Yf_g:',Yf_g,'max(Yf_g):',maxval(Yf),'pos',p%pos,'ind',p%ind,'ID',p%id
             ! Yf_too_high : block

@@ -1,0 +1,48 @@
+# Parallelization
+Partition : 1 1 1
+
+# Mesh definition
+Lx :  42e-2
+Ly :  10.5e-2
+Lz :  10.5e-2 !6.25e-4!
+nx :  100
+ny :  25
+nz :  1
+
+# Case definition
+Gas jet temperature :                   600
+Gas coflow temperature :                300
+Gas jet fuel mass fraction :            0.03
+Gas coflow fuel mass fraction:          0
+Gas jet velocity:                       24
+Gas jet radius:                         5.25e-3
+Gas coflow velocity :                   4.32 ! v_coflow = v_inj*(Gas coflow multiplier)
+
+Fuel :                                  ethanol
+Fuel-gas Schmidt number:                1.5
+Gas :                                   air
+Gas Prandtl number:                     0.7
+Pressure :                              101325
+
+Thermal diffusivity :                   2e-5 ! from engineeringtoolbox; [m^2/s]
+Fuel diffusivity :                      11e-6 !http://webserver.dmt.upm.es/~isidoro/dat1/Mass%20diffusivity%20data.pdf
+
+# Time integration
+Max timestep size : 0.001
+Max cfl number :    0.8
+Max time :          10
+
+# Pressure solver
+Pressure tolerance : 1e-6
+Pressure iteration : 100
+
+# Implicit velocity solver
+Implicit tolerance : 1e-6
+Implicit iteration : 100
+
+# Ensight ouput
+Ensight output period : 0.0003
+
+# Restart and save
+Restart output period : 100
+Restart from :          !restart_2.00016E-02
