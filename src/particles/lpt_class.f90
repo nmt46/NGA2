@@ -526,7 +526,7 @@ contains
       do i=1,this%np_
          ! Time-integrate until dt_done=dt
          ! if (this%cfg%rank.eq.0) print*,'here0',i
-         ! print*,'rank',this%cfg%rank,'advanceNext'
+         ! print*,'rank',this%cfg%rank,'advancing particle',i
          dt_done=0.0_WP
          notEvap = .true.
          dm = 0.0_WP
@@ -577,6 +577,7 @@ contains
             ! print*,'rank',this%cfg%rank,'advanceHere8'
             ! Advance energy transfer 2nd half
             this%p(i)%T_d = pold%T_d + mydt*Tdot
+            ! print*,'rank',this%cfg%rank,'oldT_d',pold%T_d,'Tdot',Tdot,'mydt',mydt,'T_d',this%p(i)%T_d
             ! print*,'rank',this%cfg%rank,'advanceHere9'
             calc_sourceE: block
                use fluidTable_class, only: Lv_ID, Cp_ID

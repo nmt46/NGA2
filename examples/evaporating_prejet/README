@@ -1,0 +1,2 @@
+This is a test of the implementation of the evaporation of a spray of Lagrangian droplets in NGA2.
+Uses second domain to hydrodynamically develop jet before it enters the spray evaporation domain. 

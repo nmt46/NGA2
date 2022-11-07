@@ -27,9 +27,6 @@ module simulation
    
    !> Simulation monitor file
    type(monitor) :: mfile,pfile,cflFile
-
-   !> Monitoring quantities
-   real(WP) :: Bm_debug = 0.0_WP ! The Spalding number for debugging
    
    public :: simulation_init,simulation_run,simulation_final
    
@@ -419,7 +416,6 @@ contains
             call mfile%add_column(lp%p(1)%d,'Part_d')
             call mfile%add_column(lp%p(1)%T_d,'Part_T')
          end if
-         call mfile%add_column(Bm_debug,'Spalding')
          call mfile%write()
 
          cflFile = monitor(amroot=lp%cfg%amRoot,name='cfl')
@@ -651,7 +647,7 @@ contains
          ! print*,'here1'
          ! Advance particles by dt
          ! print*,'U=',maxval(fs%U),'V=',maxval(fs%V),'W=',maxval(fs%W),'rho=',maxval(fs%rho),'visc=',maxval(fs%visc),'T=',maxval(T_sc%SC),'Yf=',maxval(Yf_sc%SC)
-         call lp%advance(dt=time%dt,U=fs%U,V=fs%V,W=fs%W,rho=fs%rho,visc=fs%visc,T=T_sc%SC,Yf=Yf_sc%SC,Bm_debug=Bm_debug,lTab=lTab,gTab=gTab,p_therm=p0)
+         call lp%advance(dt=time%dt,U=fs%U,V=fs%V,W=fs%W,rho=fs%rho,visc=fs%visc,T=T_sc%SC,Yf=Yf_sc%SC,lTab=lTab,gTab=gTab,p_therm=p0)
          ! print*,'max(srcM)',maxval(lp%srcM),'max(srcE)',maxval(lp%srcE)
          ! Use new source terms to determine if need to reduce next time step
          ! if (maxval(abs(lp%srcE)).gt.(0.0_WP)) then
