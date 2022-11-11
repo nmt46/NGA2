@@ -1,40 +1,42 @@
 # Parallelization
 1 Partition : 4 2 1
-2 Partition : 2 1 1
+2 Partition : 4 1 1
 
 # Mesh definition
 Lx :  40e-2
 Ly :  10e-2
-Lz :  10e-2
-Jet development L over D : 5
+Lz :  1e-3!10e-2
 
-nx1 :  400!80
-ny1 :  100!20
+nx1 :  400!600!80
+ny1 :  100!150!20
 nz1 :  1
 
-nx2 :  200 ! Lx/Ly = 10
-ny2 :  42  ! Note: 2 cells in y and z are lost to walls (unless 1D in a direction)
+Jet development L over D : 10
+nx2 :  300 
+ny2 :  32  ! Note: 2 cells in y and z are lost to walls (unless 1D in a direction)
 nz2 :  1
 
 
 # Case definition
 Droplet mean diameter :                 250e-6
 Droplet diameter standard deviation :   25e-6
-Droplet mean radius :                   3e-3
-Droplet radius standard deviation :     1e-3
-Droplet mean velocity :                 24
+Droplet injection radius :              5e-3   ! The radius of the circle in which droplets are injected
+Injection radius standard deviation :   0.5e-3
+Droplet mean velocity :                 20
 Droplet velocity standard deviation :   0.1
 Droplet temperature :                   300
-Droplet injection rate :                25000  ! Particles/sec
+#Droplet injection rate :               25000  ! Particles/sec
+Droplet fuel flow rate :                45.7 ! g/s
 
 Gas jet temperature :                   600
 Gas coflow temperature :                300
 Gas jet fuel mass fraction :            0
 Gas coflow fuel mass fraction :         0
+Gas fuel flow rate :                    29.3
 
 Gas jet radius:                         5.25e-3
 Gas jet velocity:                       24
-Gas coflow velocity :                   0.08
+Gas coflow velocity :                   4.32
 
 Fuel :                                  ethanol
 Fuel-gas Schmidt number:                1.5
@@ -60,7 +62,7 @@ Implicit tolerance : 1e-6
 Implicit iteration : 100
 
 # Ensight ouput
-Ensight output period : 0.00025
+Ensight output period : 0.0001
 
 # Restart and save
 Restart output period : 100

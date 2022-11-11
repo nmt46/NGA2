@@ -41,17 +41,19 @@ module simulation
    
    !> Simulation monitor file
    type(monitor) :: mfile,pfile,cflFile,jetFile
-
-   !> Monitoring quantities
    
    public :: simulation_init,simulation_run,simulation_final
+
+   !> Monitoring quantities
    real(WP) :: meanU
+   
    !> Case quantities
 
    real(WP) :: p0 ! ambient pressure
    real(WP) :: diff_T,diff_Yf ! non-turbulent diffusivities for scalar solvers
 
-   real(WP) :: dp,dp_sig,rp,rp_sig,u_inj,u_inj_sig,T_d,inj_rate,r_jet,u_jet,T_jet,Yf_jet,u_coflow,T_coflow,Yf_coflow
+   real(WP) :: dp,dp_sig,r_inj,r_inj_sig,u_inj,u_inj_sig,T_d,inj_rate,r_jet,u_jet,T_jet,Yf_jet,u_coflow,T_coflow,Yf_coflow
+   real(WP) :: mdot_l,mdot_g,mInj ! liquid and gas fuel flow rates
    integer :: nInj
 
    !> Quantities for flow & scalar solvers:
@@ -233,15 +235,17 @@ contains
          call param_read('Gas coflow temperature',       T_coflow)
          call param_read('Gas jet fuel mass fraction',   Yf_jet)
          call param_read('Gas coflow fuel mass fraction',Yf_coflow)
+         call param_read('Gas fuel flow rate',           mdot_g); mdot_g=mdot_g/1000.0_WP !convert to kg
 
          call param_read('Droplet mean diameter',              dp)
          call param_read('Droplet diameter standard deviation',dp_sig)
-         call param_read('Droplet mean radius',                rp)
-         call param_read('Droplet radius standard deviation',  rp_sig)
+         call param_read('Droplet injection radius',           r_inj)
+         call param_read('Injection radius standard deviation',r_inj_sig)
          call param_read('Droplet temperature',                T_d)
          call param_read('Droplet mean velocity',              u_inj)
          call param_read('Droplet velocity standard deviation',u_inj_sig)
-         call param_read('Droplet injection rate',             inj_rate)
+         ! call param_read('Droplet injection rate',             inj_rate)
+         call param_read('Droplet fuel flow rate',             mdot_l); mdot_l=mdot_l/1000.0_WP !convert to kg
 
          call param_read('Thermal diffusivity',diff_T)
          call param_read('Fuel diffusivity',   diff_Yf)
@@ -357,7 +361,7 @@ contains
             use fluidTable_class, only: mu_ID
             type(bcond),pointer :: mybc
             integer :: i,j,k,n
-            real(WP) :: rhof,viscf,R_cst,r
+            real(WP) :: rhof,viscf,R_cst,r,a,b,myN
             fs2=incomp(cfg=cfg2,name='Incompressible N-S')
 
             ! Setup bconds
@@ -386,15 +390,47 @@ contains
             do k=cfg2%kmino_,cfg2%kmaxo_
                do j=cfg2%jmino_,cfg2%jmaxo_
                   do i=cfg2%imino_,cfg2%imaxo_
-                     if (cfg2%VF(i,j,k).eq.1.0_WP) fs2%U(i,j,k)=u_jet!*(1.0_WP+0.1_WP*cos(twoPi*3*sqrt(cfg2%ym(j)**2+cfg2%zm(k)**2)/r_jet))!*(1+random_normal(0.0_WP,u_jet/100.0_WP))
-                     ! if (cfg2%VF(i,j,k).eq.1.0_WP) then
-                     !    r = sqrt(r_jet*sin((cfg2%xm(i)-cfg2%xm(cfg2%nx/2))/r_jet)**2+cfg2%ym(j)**2+cfg2%zm(k)**2)/r_jet
-                     !    fs2%U(i,j,k) = u_jet*(1.0_WP+2.0_WP*exp(-r*5.0_WP)*cfg2%ym(j)/r_jet)
-                     !    fs2%V(i,j,k) = u_jet*(      -2.0_WP*exp(-r*5.0_WP)*sin((cfg2%xm(i)-cfg2%xm(cfg2%nx/2))/r_jet))
-                     ! end if
+                     ! if (cfg2%VF(i,j,k).eq.1.0_WP) fs2%U(i,j,k)=u_jet!*(1.0_WP+0.1_WP*cos(twoPi*3*sqrt(cfg2%ym(j)**2+cfg2%zm(k)**2)/r_jet))!*(1+random_normal(0.0_WP,u_jet/100.0_WP))
+                     if (cfg2%VF(i,j,k).eq.1.0_WP) then
+                        if (fs2%cfg%nz.eq.1) then ! Use static turbulent mean flow approximation for 2D
+                           myN = 5.0_WP ! order of mean flow approximation
+                           a = u_jet/(r_jet**myN*(1/(myN+1)-1))
+                           b = -a*r_jet**myN
+                           fs2%U(i,j,k) = a*abs(fs2%cfg%ym(j))**myN+b
+                        elseif (fs2%cfg%ny.eq.1) then ! Use static turbulent mean flow approximation for 2D
+                           myN = 7.0_WP ! order of mean flow approximation
+                           a = u_jet/(r_jet**myN*(1/(myN+1)-1))
+                           b = -a*r_jet**myN
+                           fs2%U(i,j,k) = a*abs(fs2%cfg%zm(k))**myN+b
+                        else
+                           r = sqrt(r_jet*sin((cfg2%xm(i)-cfg2%xm(cfg2%nx/2))/r_jet)**2+cfg2%ym(j)**2+cfg2%zm(k)**2)/r_jet
+                           fs2%U(i,j,k) = u_jet*(1.0_WP+2.0_WP*exp(-r*5.0_WP)*cfg2%ym(j)/r_jet)
+                           fs2%V(i,j,k) = u_jet*(      -2.0_WP*exp(-r*5.0_WP)*sin((cfg2%xm(i)-cfg2%xm(cfg2%nx/2))/r_jet))   
+                        end if
+                     end if
                   end do
                end do
             end do
+            ! check_vel: block
+            !    use mpi_f08,  only: MPI_SUM,MPI_ALLREDUCE
+            !    use parallel, only: MPI_REAL_WP
+            !    integer :: i,j,k,ierr
+            !    real(WP) :: myU,myUvol,myW,myWvol,Uvol,Wvol
+            !    myU=0.0_WP; myUvol=0.0_WP; myW=0.0_WP; myWvol=0.0_WP
+            !    do k=fs2%cfg%kmin_,fs2%cfg%kmax_
+            !       do j=fs2%cfg%jmin_,fs2%cfg%jmax_
+            !          do i=fs2%cfg%imin_,fs2%cfg%imax_
+            !             if (fs2%umask(i,j,k).eq.0) then
+            !                myU   =myU   +fs2%cfg%dxm(i)*fs2%cfg%dy(j)*fs2%cfg%dz(k)*fs2%U(i,j,k)
+            !                myUvol=myUvol+fs2%cfg%dxm(i)*fs2%cfg%dy(j)*fs2%cfg%dz(k)
+            !             end if
+            !          end do
+            !       end do
+            !    end do
+            !    call MPI_ALLREDUCE(myUvol,Uvol ,1,MPI_REAL_WP,MPI_SUM,fs2%cfg%comm,ierr)
+            !    call MPI_ALLREDUCE(myU   ,meanU,1,MPI_REAL_WP,MPI_SUM,fs2%cfg%comm,ierr); meanU=meanU/Uvol
+            !    if (cfg2%amRoot) print*,'meanU',meanU
+            ! end block check_vel   
 
             ! call fs2%get_bcond('gas_inj',mybc)
             ! do n=1,mybc%itr%no_
@@ -433,7 +469,7 @@ contains
          ! Initialize our LPT
          initialize_lpt: block
             use fluidTable_class, only: rho_ID
-            use mathtools, only: twoPi
+            use mathtools, only: Pi,twoPi
             use random, only: random_normal,random_uniform
             real(WP) :: theta
             integer :: i,np
@@ -443,47 +479,13 @@ contains
             call lTab%evalProps(propOut=lp%rho,T_q=T_d,P_q=p0,propID=rho_ID)
             ! Set filter scale to 3.5*dx
             lp%filter_width=3.5_WP*cfg1%min_meshsize
-            np = 0!int(floor(inj_rate*time1%dt))
-            nInj = np
-            ! Root process initializes 1000 particles randomly
-            if (lp%cfg%amRoot) then
-               call lp%resize(np)
-               do i=1,np
-                  ! Give id
-                  lp%p(i)%id=int(i,8)
-                  lp%p(i)%d=random_normal(dp,dp_sig)
-                  
-                  ! Set the temperature 
-                  lp%p(i)%T_d = T_d
-
-                  !!!!!!!!! Assign position !!!!!!!!!!
-                  ! For ring distribution:
-                  if (cfg1%ny.eq.1) then
-                     theta = 2.0_WP*floor(random_uniform(0.0_WP,2.0_WP))-1.0_WP ! Use theta as either -1 or 1
-                     lp%p(np)%pos = random_normal(rp,rp_sig)*[0.0_WP,0.0_WP,theta]
-                  elseif (cfg1%nz.eq.1) then
-                     theta = 2.0_WP*floor(random_uniform(0.0_WP,2.0_WP))-1.0_WP ! Use theta as either -1 or 1
-                     lp%p(np)%pos = random_normal(rp,rp_sig)*[0.0_WP,theta,0.0_WP]
-                  else
-                     theta = random_uniform(0.0_WP,twoPi)
-                     lp%p(np)%pos = random_normal(rp,rp_sig)*[0.0_WP,cos(theta),sin(theta)]
-                  end if
-
-
-
-                  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                  ! Give zero velocity
-                  lp%p(i)%vel=[random_normal(u_inj,u_inj_sig),0.0_WP,0.0_WP]
-                  ! Give zero collision force
-                  lp%p(i)%col=0.0_WP
-                  ! Give zero dt
-                  lp%p(i)%dt=0.0_WP
-                  ! Locate the particle on the mesh
-                  lp%p(i)%ind=lp%cfg%get_ijk_global(lp%p(i)%pos,[lp%cfg%imin,lp%cfg%jmin,lp%cfg%kmin])
-                  ! Activate the particle
-                  lp%p(i)%flag=0
-                  ! print*,'ID:',lp%p(i)%id,'d',lp%p(i)%d,'pos',lp%p(i)%pos,'vel',lp%p(i)%vel
-               end do
+            nInj = 0
+            mInj = 0.0_WP
+            ! Adjust injection rate for cell widths in 2D cases
+            if (lp%cfg%ny.eq.1) then
+               mdot_l = mdot_l*lp%cfg%dy(1)*2.0_WP/(Pi*r_inj)
+            elseif (lp%cfg%nz.eq.1) then
+               mdot_l = mdot_l*lp%cfg%dz(1)*2.0_WP/(Pi*r_inj)
             end if
             ! Distribute particles
             call lp%sync()
@@ -605,6 +607,12 @@ contains
                do j=lp%cfg%jmino_,lp%cfg%jmaxo_
                   do i=lp%cfg%imino_,lp%cfg%imaxo_
                      fs1%U(i,j,k)=0.0_WP;fs1%rhoU(i,j,k)=0.0_WP
+                     ! if(sqrt(fs1%cfg%ym(j)**2+fs1%cfg%zm(k)**2).le.r_jet) then
+                     !    fs1%U(i,j,k)=u_jet
+                     ! else
+                     !    fs1%U(i,j,k)=0.0_WP
+                     ! end if
+                     ! fs1%rhoU(i,j,k)=fs1%U(i,j,k)*fs1%rho(i,j,k)
                      fs1%V(i,j,k)=0.0_WP;fs1%rhoV(i,j,k)=0.0_WP
                      fs1%W(i,j,k)=0.0_WP;fs1%rhoW(i,j,k)=0.0_WP
                   end do
@@ -675,6 +683,7 @@ contains
             call ens_out1%add_scalar('yf',Yf_sc%SC)
             call ens_out1%add_scalar('temperature',T_sc%SC)
             call ens_out1%add_scalar('density',T_sc%rho)
+            call ens_out1%add_scalar('viscosity',fs1%visc)
             call ens_out1%add_scalar('srcM',lp%srcM)
             call ens_out1%add_scalar('srcE',lp%srcE)
 
@@ -721,6 +730,7 @@ contains
             call mfile%add_column(lp%np,'N_part')
             call mfile%add_column(nInj,'N_inj')
             call mfile%add_column(lp%nEvap,'N_evap')
+            call mfile%add_column(lp%nKill,'N_kill')
             ! call mfile%add_column(lp%VFmean,'Mean_VF')
             ! call mfile%add_column(lp%Umin,'P_Umin')
             call mfile%add_column(lp%Umean,'P_Umean')
@@ -797,7 +807,7 @@ contains
 
          ! Update velocity in development region (domain 2)
          if (amGrp2) then
-            do while (time2%t.lt.time1%t)
+            do while (time2%t.lt.time1%t.and..not.((cfg2%nz.eq.1).or.(cfg2%ny.eq.1)))
                ! print*,'Jet Development Solver, t=',time2%t
                ! Increment time
                call fs2%get_cfl(time2%dt,time2%cfl)
@@ -1257,41 +1267,50 @@ contains
                time1%it=time1%it+1
             end do
 
-            ! Spawn particles
-            spawn_particles: block
-               use random, only: random_normal,random_uniform
-               use mathtools, only: twoPi
+            ! Inject fuel droplets
+            inject_droplets: block
+               use random, only: random_normal,random_uniform,random_lognormal
+               use mathtools, only: twoPi,Pi
                integer :: i,np,nAdd
-               real(WP) :: theta
-               if (lp%cfg%amRoot) then
-                  nAdd = int(floor(inj_rate*time1%t))-nInj
-                  do i=1,nAdd
+               real(WP) :: r,theta,t_0,mNext
+               t_0=0.0_WP!(4.0_WP*r_jet/u_jet)
+               if (lp%cfg%amRoot.and.(time1%t.gt.t_0)) then
+                  mNext = mdot_l*(time1%t-t_0)
+                  ! print*,'mNext',mNext,'mdot_l',mdot_l,'time1%t',time1%t,'t_0',t_0
+                  do while(mInj.lt.mNext)
+                     ! print*,'inject0a'
                      np=lp%np_+1; call lp%resize(np)
+                     ! print*,'inject0b'
                      ! Give id
-                     lp%p(i)%id=nInj+i
+                     lp%p(np)%id=nInj+1
+                     ! print*,'inject0c'
                      ! Set the diameter
-                     lp%p(np)%d=random_normal(dp,dp_sig)
+                     lp%p(np)%d=random_lognormal(dp,dp_sig)
+                     ! print*,'inject0d'
                      ! Set the temperature 
                      lp%p(np)%T_d = T_d
+                     ! print*,'inject1'
                      ! Position with uniform distribution
                      if (cfg1%ny.eq.1) then
-                        lp%p(np)%pos = [0.0_WP,0.0_WP,random_uniform(-rp,rp)]
+                        lp%p(np)%pos = [random_uniform(0.0_WP,lp%cfg%dx(1)),0.0_WP,random_uniform(-r_inj,r_inj)]
                      elseif (cfg1%nz.eq.1) then
-                        lp%p(np)%pos = [0.0_WP,random_uniform(-rp,rp),0.0_WP]
+                        lp%p(np)%pos = [random_uniform(0.0_WP,lp%cfg%dx(1)),random_uniform(-r_inj,r_inj),0.0_WP]
                      else
                         theta = random_uniform(0.0_WP,twoPi)
-                        lp%p(np)%pos = sqrt(random_uniform(0.0_WP,rp_sig))*[0.0_WP,cos(theta),sin(theta)]
+                        r = sqrt(random_uniform(0.0_WP,r_inj))
+                        lp%p(np)%pos = [random_uniform(0.0_WP,lp%cfg%dx(1)),r*cos(theta),r*sin(theta)]
                      end if
+                     ! print*,'inject2'
                      ! Position with normal distribution
                         ! if (cfg1%ny.eq.1) then
                         !    theta = 2.0_WP*floor(random_uniform(0.0_WP,2.0_WP))-1.0_WP ! Use theta as either -1 or 1
-                        !    lp%p(np)%pos = random_normal(rp,rp_sig)*[0.0_WP,0.0_WP,theta]
+                        !    lp%p(np)%pos = random_normal(r_inj,r_inj_sig)*[0.0_WP,0.0_WP,theta]
                         ! elseif (cfg1%nz.eq.1) then
                         !    theta = 2.0_WP*floor(random_uniform(0.0_WP,2.0_WP))-1.0_WP ! Use theta as either -1 or 1
-                        !    lp%p(np)%pos = random_normal(rp,rp_sig)*[0.0_WP,theta,0.0_WP]
+                        !    lp%p(np)%pos = random_normal(r_inj,r_inj_sig)*[0.0_WP,theta,0.0_WP]
                         ! else
                         !    theta = random_uniform(0.0_WP,twoPi)
-                        !    lp%p(np)%pos = random_normal(rp,rp_sig)*[0.0_WP,cos(theta),sin(theta)]
+                        !    lp%p(np)%pos = random_normal(r_inj,r_inj_sig)*[0.0_WP,cos(theta),sin(theta)]
                         ! end if
 
                      ! Give zero velocity
@@ -1302,18 +1321,23 @@ contains
                      lp%p(np)%dt=0.0_WP
                      ! Locate the particle on the mesh
                      lp%p(np)%ind=lp%cfg%get_ijk_global(lp%p(np)%pos,[lp%cfg%imin,lp%cfg%jmin,lp%cfg%kmin])
+                     ! print*,'inject3'
                      ! Activate the particle
                      lp%p(np)%flag=0
                      lp%np_=np
+                     ! print*,'inject4'
+                     nInj=nInj+1
+                     mInj=mInj+lp%rho*Pi/6.0_WP*(lp%p(np)%d**3)
+                     ! print*,'mInj:',mInj,'nInj:',nInj
                   end do
-                  nInj=nInj+nAdd
+                  
                end if
                ! Distribute particles
                call lp%sync()
                         ! Get initial particle volume fraction
                call lp%update_VF()
 
-            end block spawn_particles
+            end block inject_droplets
 
             ! Advance particles by dt
             ! print*,'U=',maxval(fs1%U),'V=',maxval(fs1%V),'W=',maxval(fs1%W),'rho=',maxval(fs1%rho),'visc=',maxval(fs1%visc),'T=',maxval(T_sc%SC),'Yf=',maxval(Yf_sc%SC)

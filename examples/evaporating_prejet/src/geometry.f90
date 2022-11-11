@@ -136,17 +136,17 @@ contains
             call param_read('Jet development L over D',L_over_D)
             Lx = D*L_over_D
             if (ny.eq.1) then
-               Ly=D!call param_read('Ly',Ly)
+               Ly=Lx/nx!call param_read('Ly',Ly)
             else
                Ly = D*real(ny,WP)/(real(ny-2,WP))
             end if
             if (nz.eq.1) then
-               Lz=D!call param_read('Lz',Lz)
+               Lz=Lx/nx!call param_read('Lz',Lz)
             else
                Lz = D*real(nz,WP)/(real(nz-2,WP))
             end if
 
-            ! Center grid on jet; x=0 at exit of pre-jet region (not strictly necessary, but makes for better viz)
+            ! Center grid on jet; x=0 at exit of pre-jet region
             do i=1,nx+1
                x(i)=(real(i-1,WP)/real(nx,WP)-1.0_WP)*Lx
             end do

@@ -58,8 +58,7 @@ module lpt_class
       integer :: np_                                      !< Local number of particles
       integer, dimension(:), allocatable :: np_proc       !< Number of particles on each processor
       type(part), dimension(:), allocatable :: p          !< Array of particles of type part
-      integer :: nEvap_=0                                 !< Number of particles locally evaporated
-      integer :: nEvap                                    !< Number of particles globally evaporated
+
       ! Overlap particle (i.e., ghost) data
       integer :: ng_                                      !< Local number of ghosts
       type(part), dimension(:), allocatable :: g          !< Array of ghosts of type part
@@ -91,7 +90,11 @@ module lpt_class
       real(WP) :: dtMin,dtMax
       integer  :: np_new,np_out                           !< Number of new and removed particles
       real(WP) :: Xmax,Xmin                               !< Max/min x-position of particles
-      
+      integer :: nEvap_=0                                 !< Number of particles locally evaporated
+      integer :: nEvap                                    !< Number of particles globally evaporated
+      integer :: nKill                                    !< Number of particles globally killed due to boiling temperature
+      integer :: nKill_=0                                 !< Number of particles locally killed due to boiling temperature
+
       ! Particle volume fraction
       real(WP), dimension(:,:,:), allocatable :: VF       !< Particle volume fraction, cell-centered
       
@@ -491,6 +494,7 @@ contains
    
    !> Advance the particle equations by a specified time step dt
    subroutine advance(this,dt,U,V,W,rho,visc,T,Yf,lTab,gTab,p_therm)
+      use mpi_f08, only : MPI_SUM,MPI_ALLREDUCE
       use mathtools, only: Pi
       use messager, only: die
       use fluidTable_class, only: fluidTable
@@ -514,7 +518,7 @@ contains
       real(WP) :: m_d,m_old,Mdot,Tdot,TdotMid ! drop current, old mass; mdot of drop, Temp-dot of drop
       real(WP) :: dm,dE ! mass,energy change (pure mass,energy units) from beginning to end of time step
       logical :: notEvap
-
+      integer :: erFlag
       
       ! Zero out source term arrays
       this%srcU=0.0_WP
@@ -545,7 +549,7 @@ contains
             m_old = m_d ! store old mass
             ! Advance with Euler prediction
             call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),Tdot=Tdot,Mdot=Mdot,acc=acc,opt_dt=this%p(i)%dt,&
-               lTab=lTab,gTab=gTab,p_therm=p_therm)
+               lTab=lTab,gTab=gTab,p_therm=p_therm,erFlag=erFlag)
             ! print*,'rank',this%cfg%rank,'advanceHere2'
             ! Advance pos, vel 1st half
             this%p(i)%pos=pold%pos+0.5_WP*mydt*this%p(i)%vel
@@ -562,7 +566,7 @@ contains
             ! Correct with midpoint rule
             ! print*,'rank',this%cfg%rank,'advanceHere5'
             call this%get_rhs(U=U,V=V,W=W,rho=rho,visc=visc,T=T,Yf=Yf,p=this%p(i),acc=acc,Tdot=Tdot,Mdot=Mdot,opt_dt=this%p(i)%dt,&
-               lTab=lTab,gTab=gTab,p_therm=p_therm)
+               lTab=lTab,gTab=gTab,p_therm=p_therm,erFlag=erFlag)
             ! print*,'rank',this%cfg%rank,'advanceHere6'
             !   if (this%cfg%rank.eq.0) print*,'here2',i
             ! Advance pos, vel
@@ -586,7 +590,7 @@ contains
                call lTab%evalProps(propOut=Cp_l,T_q=(pold%T_d+this%p(i)%T_d)/2.0_WP,P_q=p_therm,propID=Cp_ID) ! Drop specific heat at constant pressure [J/(kg*K)]
                dE = Cp_l*(this%p(i)%T_d*m_d-pold%T_d*m_old)+Lv*(m_old-m_d)
                ! Evaporate away the drop by mainatinin conserved quanities
-               if (this%p(i)%d.le.this%min_diam) then
+               if ((this%p(i)%d.le.this%min_diam).or.(erFlag.gt.0)) then
                      ! add to source terms when killing the drop
                      dm = dm - this%rho*Pi/6.0_WP*this%p(i)%d**3.0_WP
                      dE = dE + Lv*m_d
@@ -594,6 +598,27 @@ contains
                      notEvap = .false.
                      this%nEvap_ = this%nEvap_+1
                end if
+               if (erFlag.gt.0) then
+                  this%nKill_=this%nKill_+1
+                  if (this%cfg%amRoot) then
+                     logging : block
+                        ! use messager, only: log
+                        use, intrinsic :: iso_fortran_env, only: output_unit
+                        use string, only: str_long
+                        character(len=str_long) :: message
+                        real(WP) :: Yf_g,max_Yf
+                        max_Yf = maxval(Yf)
+                        Yf_g = this%cfg%get_scalar(pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=Yf,bc='n')
+                        write(output_unit,'("Logging that particle ID ",i0,", on rank ",i0,", ijk ",i0,",",i0,",",i0," died.")')&
+                           ,this%p(i)%id,this%cfg%rank,this%p(i)%ind(1),this%p(i)%ind(2),this%p(i)%ind(3)
+                        ! call log(message)
+                        write(output_unit,'("pos=",es11.4,",",es11.4,",",es11.4," T=",es11.4,",d_p=",es11.4,",Yf_g=",es11.4,",maxYf=",es11.4,"")')&
+                           ,this%p(i)%pos(1),this%p(i)%pos(2),this%p(i)%pos(3),this%p(i)%T_d,this%p(i)%d,Yf_g,max_Yf
+                        ! call log(message)
+                     end block logging
+                  end if
+               end if
+
                   ! print*,'rank',this%cfg%rank,'np checkpoint1a',this%np,'pos:',this%p(i)%pos,'ind',this%p(i)%ind,'ID',this%p(i)%id,'diam',this%p(i)%d
             end block calc_sourceE
             !   if (this%cfg%rank.eq.0) print*,'here4',i
@@ -640,6 +665,8 @@ contains
       this%srcM=this%srcM/this%cfg%vol; call this%cfg%syncsum(this%srcM); call this%filter(this%srcM)
       this%srcE=this%srcE/this%cfg%vol; call this%cfg%syncsum(this%srcE); call this%filter(this%srcE)
       ! print*,'rank',this%cfg%rank,'np checkpoint 8',this%np
+
+
       ! Recompute volume fraction
       call this%update_VF()
       
@@ -661,7 +688,7 @@ contains
    
    
    !> Calculate RHS of the particle ODEs
-   subroutine get_rhs(this,U,V,W,rho,visc,T,Yf,p,acc,Tdot,Mdot,opt_dt,lTab,gTab,p_therm)
+   subroutine get_rhs(this,U,V,W,rho,visc,T,Yf,p,acc,Tdot,Mdot,opt_dt,lTab,gTab,p_therm,erFlag)
       use mathtools, only: Pi
       use messager, only: die
       use fluidTable_class, only: fluidTable,mu_ID
@@ -684,6 +711,8 @@ contains
       real(WP) :: Re,corr,tau,b1,b2
       real(WP) :: fvisc,frho,pVF,fVF
       real(WP), dimension(3) :: fvel
+      integer, intent(out) :: erFlag
+      erFlag = 0
       ! if (this%cfg%rank.eq.0) print*,'RHS0'
       ! print*,'rank',this%cfg%rank,'RHS0'
       ! Interpolate the fluid phase velocity to the particle location
@@ -785,57 +814,65 @@ contains
             call die("Yf interpolation error, Yf_interp>30*maxval(Yf_array)")
          end if
          ! print*,'rank',this%cfg%rank,'ID',p%id,'Spalding:',Bm,'Yf_g',Yf_g,'Yf_s',Yf_s,'T_d',p%T_d
-         if (p%T_d.gt.T_b) then
+         if ((p%T_d.gt.T_b).or.(Bm.lt.-1.0_WP)) then
             ! print*,'About to die, rank',this%cfg%rank,'ID',p%id,'T_d',p%T_d,'diam',p%d,'pos',p%pos,'dt',p%dt
-            call die('Drop Temp above boiling')
+            erFlag = 1
+            ! call die('Drop Temp above boiling')
          end if
-         if (Bm.lt.-1.0_WP) call die('Spaulding Number Less than -1...')
-         ! Mass transfer
-         m_d = (this%rho*Pi*p%d**3.0_WP)/6.0_WP
-         Mdot = -Sh_g*m_d*log(1.0_WP+Bm)/(3.0_WP*Sc_g*tau)
-         ! print*,'rank',this%cfg%rank,'Mdot:',Mdot
-         ! if (this%cfg%rank.eq.0) print*,'RHS3'
-         ! Energy transfer
-         beta = (-3.0_WP*Pr_g*tau/2.0_WP*Mdot/m_d)
-         f2 = beta/(exp(beta)-1.0_WP)
-         Tdot = Nu_g*Cp_g*f2*(T_g-p%T_d)/(3.0_WP*Pr_g*Cp_l*tau) + Mdot*Lv/(m_d*Cp_l)
-         ! print*,'rank',this%cfg%rank,'Tdot:',Tdot
+         ! if (Bm.lt.-1.0_WP) call die('Spaulding Number Less than -1...')
+         if (erFlag.eq.0) then
+            ! Mass transfer
+            m_d = (this%rho*Pi*p%d**3.0_WP)/6.0_WP
+            Mdot = -Sh_g*m_d*log(1.0_WP+Bm)/(3.0_WP*Sc_g*tau)
+            ! print*,'rank',this%cfg%rank,'Mdot:',Mdot
+            ! if (this%cfg%rank.eq.0) print*,'RHS3'
+            ! Energy transfer
+            beta = (-3.0_WP*Pr_g*tau/2.0_WP*Mdot/m_d)
+            f2 = beta/(exp(beta)-1.0_WP)
+            Tdot = Nu_g*Cp_g*f2*(T_g-p%T_d)/(3.0_WP*Pr_g*Cp_l*tau) + Mdot*Lv/(m_d*Cp_l)
+            ! print*,'rank',this%cfg%rank,'Tdot:',Tdot
 
-         ! A multiplier of temperature time step to decrease step size as drop diameter decreases:
-         ! if (p%d.ge.4e-5) then
-         !    scale_tau = 1.0_WP
-         ! elseif (p%d.ge.1e-5) then
-         !    scale_tau = 2.0_WP
-         ! else
-         !    scale_tau = 5.0_WP
-         ! end if
-         ! if (p%T_d.ge.(T_b*0.9_WP)) then
-         scale_tau = max(min(T_b/(10.0_WP*abs(T_b-p%T_d+epsilon(1.0_WP))),50.0_WP),1.0_WP)
-            ! Reduce timestep as temperature approaches boiling, though only to a point!
-            ! (getting permanently stuck in a while loop isn't the most fun :) )
-         ! else
-         !    scale_tau = 1.0_WP
-         ! end if
-         ! print*,'rank',this%cfg%rank,'T_d',p%T_d,'T_b',T_b,'scaling',scale_tau
-         ! Determine optimal time (inertial, thermal, mass loss)
-         tau_acc = abs(tau)/real(this%nstep,WP)
-         if (Mdot.eq.0.0_WP) then
-            tau_mdot = huge(1.0_WP)
+            ! A multiplier of temperature time step to decrease step size as drop diameter decreases:
+            ! if (p%d.ge.4e-5) then
+            !    scale_tau = 1.0_WP
+            ! elseif (p%d.ge.1e-5) then
+            !    scale_tau = 2.0_WP
+            ! else
+            !    scale_tau = 5.0_WP
+            ! end if
+            ! if (p%T_d.ge.(T_b*0.9_WP)) then
+            scale_tau = max(min(T_b/(10.0_WP*abs(T_b-p%T_d+epsilon(1.0_WP))),200.0_WP),1.0_WP)
+               ! Reduce timestep as temperature approaches boiling, though only to a point!
+               ! (getting permanently stuck in a while loop isn't the most fun :) )
+            ! else
+            !    scale_tau = 1.0_WP
+            ! end if
+            ! print*,'rank',this%cfg%rank,'T_d',p%T_d,'T_b',T_b,'scaling',scale_tau
+            ! Determine optimal time (inertial, thermal, mass loss)
+            tau_acc = abs(tau)/real(this%nstep,WP)
+            if (Mdot.eq.0.0_WP) then
+               tau_mdot = huge(1.0_WP)
+            else
+            tau_mdot = abs(m_d/Mdot)
+            end if
+            ! print*,'rank',this%cfg%rank,'ID',p%id,'Nu_g:',Nu_g,'tau',tau,'f2',f2,'T_d',p%T_d
+            if ((T_g-p%T_d).eq.0.0_WP) then
+               tau_T = huge(1.0_WP)
+            else
+               tau_T = abs((3.0_WP*Pr_g*Cp_l*tau)/(Nu_g*Cp_g*f2)*(T_b-p%T_d)/(T_g-p%T_d))
+            end if
+            opt_dt = min(tau_acc,tau_mdot,tau_T)/scale_tau
+            ! print*,'rank',this%cfg%rank,'ID',p%id,'tau_T',tau_T,'T_dot:',Tdot,'T_d:',p%T_d,'T_g',T_g,'opt_dt',opt_dt
+            if (.not.((tau_T.ge.0.0_WP).or.(tau_T.lt.0.0_WP))) call die('NaN time constant')
+            ! if (tau_T.le.1.0_WP) call die('NaN time constant')
+            ! print*,'rank',this%cfg%rank,'ID',p%id,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
+            ! if (this%cfg%rank.eq.0) print*,'RHS4'
          else
-         tau_mdot = abs(m_d/Mdot)
+            acc = 0.0_WP
+            Tdot = 0.0_WP
+            Mdot = 0.0_WP
+            opt_dt = 0.0_WP
          end if
-         ! print*,'rank',this%cfg%rank,'ID',p%id,'Nu_g:',Nu_g,'tau',tau,'f2',f2,'T_d',p%T_d
-         if ((T_g-p%T_d).eq.0.0_WP) then
-            tau_T = huge(1.0_WP)
-         else
-            tau_T = abs((3.0_WP*Pr_g*Cp_l*tau)/(Nu_g*Cp_g*f2)*(T_b-p%T_d)/(T_g-p%T_d))
-         end if
-         opt_dt = min(tau_acc,tau_mdot,tau_T)/scale_tau
-         ! print*,'rank',this%cfg%rank,'ID',p%id,'tau_T',tau_T,'T_dot:',Tdot,'T_d:',p%T_d,'T_g',T_g,'opt_dt',opt_dt
-         if (.not.((tau_T.ge.0.0_WP).or.(tau_T.lt.0.0_WP))) call die('NaN time constant')
-         ! if (tau_T.le.1.0_WP) call die('NaN time constant')
-         ! print*,'rank',this%cfg%rank,'ID',p%id,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
-         ! if (this%cfg%rank.eq.0) print*,'RHS4'
       end block evaporate_rhs
 
    end subroutine get_rhs
@@ -967,6 +1004,8 @@ contains
       call MPI_ALLREDUCE(this%Xmax,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%Xmax=buf
       call MPI_ALLREDUCE(this%Xmin,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%Xmin=buf
       call MPI_ALLREDUCE(real(this%nEvap_,WP),buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%nEvap=buf
+      call MPI_ALLREDUCE(real(this%nKill_,WP),buf,1,MPI_REAL_WP,MPI_SUM,this%cfg%comm,ierr); this%nKill=buf
+
 
       ! Diameter and velocity variance
       this%dvar=0.0_WP
