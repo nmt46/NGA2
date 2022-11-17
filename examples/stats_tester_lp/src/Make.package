@@ -1,0 +1,2 @@
+# List here the extra files here
+f90EXE_sources += geometry.f90 simulation.f90 stats_class.f90 coolprop.f90 fluidTable_class.f90

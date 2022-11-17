@@ -775,50 +775,52 @@ contains
          Pr_g = gTab%Pr
          Sc_g = gTab%Sc
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-         ! print*,'rank',this%cfg%rank,'RHS6'
-         Nu_g = 2.0_WP+0.552_WP*(Re)**0.5_WP*(Pr_g)**(1.0_WP/3.0_WP)
-         Sh_g = 2.0_WP+0.552_WP*(Re)**0.5_WP*(Sc_g)**(1.0_WP/3.0_WP)
-         
-         chi_eq_s = exp(Lv*(1.0_WP/T_b-1.0_WP/p%T_d)/(R_cst/W_l))
-         Yf_s = (chi_eq_s)/(chi_eq_s+(1.0_WP-chi_eq_s)*(W_g/W_l))
-         
-         Yf_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=Yf,bc='n')! get T_g from interpolating T
-         if (Yf_g.lt.0.0_WP) Yf_g = 0.0_WP ! Clip away negative Yf noise
-         ! Spalding number
-         Bm = (Yf_s-Yf_g)/(1.0_WP-Yf_s)
-         if (Yf_g.gt.maxval(Yf)*30.0_WP) then
-            print*,'Warning, Yf_g artificially high. Yf_g:',Yf_g,'max(Yf_g):',maxval(Yf),'pos',p%pos,'ind',p%ind,'ID',p%id
-            ! Yf_too_high : block
-            !    integer :: i,j,k,k2
-            !    ! Stolen from config_class
-            !    ! Find right i index
-            !    i=max(min(this%cfg%imaxo_-1,p%ind(1)),this%cfg%imino_)
-            !    do while (p%pos(1)-this%cfg%xm(i  ).lt.0.0_WP.and.i  .gt.this%cfg%imino_); i=i-1; end do
-            !    do while (p%pos(1)-this%cfg%xm(i+1).ge.0.0_WP.and.i+1.lt.this%cfg%imaxo_); i=i+1; end do
-            !    ! Find right j index
-            !    j=max(min(this%cfg%jmaxo_-1,p%ind(2)),this%cfg%jmino_)
-            !    do while (p%pos(2)-this%cfg%ym(j  ).lt.0.0_WP.and.j  .gt.this%cfg%jmino_); j=j-1; end do
-            !    do while (p%pos(2)-this%cfg%ym(j+1).ge.0.0_WP.and.j+1.lt.this%cfg%jmaxo_); j=j+1; end do
-            !    ! Find right k index
-            !    k=max(min(this%cfg%kmaxo_-1,p%ind(3)),this%cfg%kmino_)
-            !    do while (p%pos(3)-this%cfg%zm(k  ).lt.0.0_WP.and.k  .gt.this%cfg%kmino_); k=k-1; end do
-            !    do while (p%pos(3)-this%cfg%zm(k+1).ge.0.0_WP.and.k+1.lt.this%cfg%kmaxo_); k=k+1; end do                  
-            !    ! print*,'Surrounding Yf field:'
-            !    do k2=max(k-1,this%cfg%kmino_),min(k+1,this%cfg%kmaxo_)
-            !       ! print*,Yf(max(i-1,this%cfg%imino_):min(i+1,this%cfg%imaxo_),&
-            !              max(j-1,this%cfg%jmino_):min(j+1,this%cfg%jmaxo_),&
-            !              k2)
-            !    end do
-            ! end block Yf_too_high 
-            call die("Yf interpolation error, Yf_interp>30*maxval(Yf_array)")
-         end if
-         ! print*,'rank',this%cfg%rank,'ID',p%id,'Spalding:',Bm,'Yf_g',Yf_g,'Yf_s',Yf_s,'T_d',p%T_d
-         if ((p%T_d.gt.T_b).or.(Bm.lt.-1.0_WP)) then
-            ! print*,'About to die, rank',this%cfg%rank,'ID',p%id,'T_d',p%T_d,'diam',p%d,'pos',p%pos,'dt',p%dt
+         if (p%T_d.gt.T_b) then
             erFlag = 1
-            ! call die('Drop Temp above boiling')
+         else
+         ! print*,'rank',this%cfg%rank,'RHS6'
+            Nu_g = 2.0_WP+0.552_WP*(Re)**0.5_WP*(Pr_g)**(1.0_WP/3.0_WP)
+            Sh_g = 2.0_WP+0.552_WP*(Re)**0.5_WP*(Sc_g)**(1.0_WP/3.0_WP)
+            
+            chi_eq_s = exp(Lv*(1.0_WP/T_b-1.0_WP/p%T_d)/(R_cst/W_l))
+            Yf_s = (chi_eq_s)/(chi_eq_s+(1.0_WP-chi_eq_s)*(W_g/W_l))
+            
+            Yf_g = this%cfg%get_scalar(pos=p%pos,i0=p%ind(1),j0=p%ind(2),k0=p%ind(3),S=Yf,bc='n')! get T_g from interpolating T
+            if (Yf_g.lt.0.0_WP) Yf_g = 0.0_WP ! Clip away negative Yf noise
+            ! Spalding number
+            Bm = (Yf_s-Yf_g)/(1.0_WP-Yf_s)
+            if (Yf_g.gt.maxval(Yf)*30.0_WP) then
+               print*,'Warning, Yf_g artificially high. Yf_g:',Yf_g,'max(Yf_g):',maxval(Yf),'pos',p%pos,'ind',p%ind,'ID',p%id
+               ! Yf_too_high : block
+               !    integer :: i,j,k,k2
+               !    ! Stolen from config_class
+               !    ! Find right i index
+               !    i=max(min(this%cfg%imaxo_-1,p%ind(1)),this%cfg%imino_)
+               !    do while (p%pos(1)-this%cfg%xm(i  ).lt.0.0_WP.and.i  .gt.this%cfg%imino_); i=i-1; end do
+               !    do while (p%pos(1)-this%cfg%xm(i+1).ge.0.0_WP.and.i+1.lt.this%cfg%imaxo_); i=i+1; end do
+               !    ! Find right j index
+               !    j=max(min(this%cfg%jmaxo_-1,p%ind(2)),this%cfg%jmino_)
+               !    do while (p%pos(2)-this%cfg%ym(j  ).lt.0.0_WP.and.j  .gt.this%cfg%jmino_); j=j-1; end do
+               !    do while (p%pos(2)-this%cfg%ym(j+1).ge.0.0_WP.and.j+1.lt.this%cfg%jmaxo_); j=j+1; end do
+               !    ! Find right k index
+               !    k=max(min(this%cfg%kmaxo_-1,p%ind(3)),this%cfg%kmino_)
+               !    do while (p%pos(3)-this%cfg%zm(k  ).lt.0.0_WP.and.k  .gt.this%cfg%kmino_); k=k-1; end do
+               !    do while (p%pos(3)-this%cfg%zm(k+1).ge.0.0_WP.and.k+1.lt.this%cfg%kmaxo_); k=k+1; end do                  
+               !    ! print*,'Surrounding Yf field:'
+               !    do k2=max(k-1,this%cfg%kmino_),min(k+1,this%cfg%kmaxo_)
+               !       ! print*,Yf(max(i-1,this%cfg%imino_):min(i+1,this%cfg%imaxo_),&
+               !              max(j-1,this%cfg%jmino_):min(j+1,this%cfg%jmaxo_),&
+               !              k2)
+               !    end do
+               ! end block Yf_too_high 
+               call die("Yf interpolation error, Yf_interp>30*maxval(Yf_array)")
+            end if
+            ! print*,'rank',this%cfg%rank,'ID',p%id,'Spalding:',Bm,'Yf_g',Yf_g,'Yf_s',Yf_s,'T_d',p%T_d
+            if (Bm.lt.-1.0_WP) then
+               erFlag = 1
+            end if
          end if
+         
          ! if (Bm.lt.-1.0_WP) call die('Spaulding Number Less than -1...')
          if (erFlag.eq.0) then
             ! Mass transfer
@@ -868,9 +870,9 @@ contains
             ! print*,'rank',this%cfg%rank,'ID',p%id,'tau_acc',tau_acc,'tau_mdot',tau_mdot,'tau_T',tau_T
             ! if (this%cfg%rank.eq.0) print*,'RHS4'
          else
-            acc = 0.0_WP
-            Tdot = 0.0_WP
-            Mdot = 0.0_WP
+            acc    = 0.0_WP
+            Tdot   = 0.0_WP
+            Mdot   = 0.0_WP
             opt_dt = 0.0_WP
          end if
       end block evaporate_rhs
