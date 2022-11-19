@@ -11,7 +11,7 @@ nz :  10
 
 # Case definition
 Droplet mean diameter :                 250e-6
-Droplet diameter standard deviation :   0!25e-6
+Droplet diameter standard deviation :   25e-6
 Droplet mean radius :                   4e-2
 Droplet radius standard deviation :     1e-3
 Droplet mean velocity :                 1
@@ -40,7 +40,7 @@ Fuel diffusivity :                      11e-6 !http://webserver.dmt.upm.es/~isid
 # Time integration
 Max timestep size : 0.001
 Max cfl number :    0.8
-Max time :          1
+Max time :          2
 Max temperature change : 10 ! the maximum allowable temperature change per time step [K/timeStep]
 
 # Pressure solver

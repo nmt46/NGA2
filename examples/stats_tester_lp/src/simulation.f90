@@ -81,6 +81,12 @@ contains
       if (pg%xm(i).gt.xLoc.and.pg%xm(i).lt.xLoc+1.0_WP*pg%dx(1)) isIn = .true.
    end function station_3_locator
 
+   function print_wall_time() result(wt)
+      use parallel, only: wtinit,parallel_time
+      real(WP) :: wt
+      wt = parallel_time()-wtinit
+   end function print_wall_time
+
    ! !> Define here our equation of state - rho(T,mass)
    ! subroutine get_rho()
    !    implicit none
@@ -282,6 +288,7 @@ contains
          ! use ils_class, only: pcg_amg,pfmg,gmres_amg,pcg_pfmg
          use mathtools, only : twoPi
          use fluidTable_class, only: mu_ID,rho_ID
+         use random, only : random_normal
          ! type(bcond),pointer :: mybc
          integer :: i,j,k,n
          real(WP) :: viscf,rhof
@@ -293,9 +300,17 @@ contains
          do k=cfg%kmino_,cfg%kmaxo_
             do j=cfg%jmino_,cfg%jmaxo_
                do i=cfg%imino_,cfg%imaxo_
-                  resU(i,j,k)=v_jet
-                  resV(i,j,k)=0.1_WP*v_jet*sin(twoPi*cfg%y(j)/(cfg%y(cfg%jmax)-cfg%y(cfg%jmin)))
-                  resW(i,j,k)=0.1_WP*v_jet*sin(twoPi*cfg%z(k)/(cfg%z(cfg%kmax)-cfg%z(cfg%kmin)))
+                  resU(i,j,k)=random_normal(v_jet,v_jet*0.1_WP)
+                  if (cfg%ny.ne.1) then
+                     resV(i,j,k)=0.1_WP*v_jet*sin(twoPi*cfg%y(j)/(cfg%y(cfg%jmax)-cfg%y(cfg%jmin)))
+                  else
+                     resV(i,j,k)=0.0_WP
+                  end if
+                  if (cfg%nz.ne.1) then
+                     resW(i,j,k)=0.1_WP*v_jet*sin(twoPi*cfg%z(k)/(cfg%z(cfg%kmax)-cfg%z(cfg%kmin)))
+                  else
+                     resW(i,j,k)=0.0_WP
+                  end if
                end do
             end do
          end do
@@ -304,17 +319,42 @@ contains
 
       print*,'entering stats initialization'
       ! Create stats collector
+      ! initialize_stats : block
+      !    use messager, only: die
+      !    st = stats_parent(cfg=cfg,name='Particle Stats')
+
+      !    ! Add our stations
+      !    call st%add_station(name='x=0',dim='yz',locator=station_1_locator)
+      !    call st%add_station(name='x=0.2',dim='yz',locator=station_2_locator)
+      !    call st%add_station(name='x=0.39',dim='yz',locator=station_3_locator)
+      !    ! Initialize stats
+      !    call st%init_stats(lp=lp)         
+      ! end block initialize_stats
       initialize_stats : block
+         use messager, only: die
          st = stats_parent(cfg=cfg,name='Particle Stats')
 
          ! Add our stations
          call st%add_station(name='x=0',dim='yz',locator=station_1_locator)
          call st%add_station(name='x=0.2',dim='yz',locator=station_2_locator)
          call st%add_station(name='x=0.39',dim='yz',locator=station_3_locator)
-
          ! Initialize stats
-         call st%init_stats(lp=lp)
+         call st%add_array(name='U',array=resU)
+         call st%add_array(name='V',array=resV)
+         call st%add_array(name='W',array=resW)
+         call st%set_lp(lp=lp)
 
+         call st%add_definition(name='U',     def='U')
+         call st%add_definition(name='U^2',   def='U*U')
+         call st%add_definition(name='p_d',   def='p_d')
+         call st%add_definition(name='p_d^2', def='p_d*p_d')
+         call st%add_definition(name='p_T',   def='p_T')
+
+         call st%init_stats()
+         ! print*,st%arp(1)%val(cfg%imin_:cfg%imax_,cfg%jmin_:cfg%jmax_,cfg%kmin_:cfg%kmax_)
+         ! resV = 0.0_WP
+         ! print*,st%arp(1)%val(cfg%imin_:cfg%imax_,cfg%jmin_:cfg%jmax_,cfg%kmin_:cfg%kmax_)
+         ! call die('cya')
       end block initialize_stats
 
 
@@ -436,6 +476,19 @@ contains
          call time%adjust_dt()
          call time%increment()
          
+
+         ! Mess with the velocity
+         mess_vel : block
+         use random, only :random_normal
+         integer :: i,j,k
+            do k=cfg%kmino_,cfg%kmaxo_
+               do j=cfg%jmino_,cfg%jmaxo_
+                  do i=cfg%imino_,cfg%imaxo_
+                     resU(i,j,k)=random_normal(v_jet,v_jet*0.1_WP)
+                  end do
+               end do
+            end do
+         end block mess_vel
          ! Spawn particles
          spawn_particles: block
             use random, only: random_normal,random_uniform,random_lognormal
@@ -486,7 +539,10 @@ contains
          ! Advance particles by dt
          ! print*,'U=',maxval(fs%U),'V=',maxval(fs%V),'W=',maxval(fs%W),'rho=',maxval(fs%rho),'visc=',maxval(fs%visc),'T=',maxval(T_sc%SC),'Yf=',maxval(Yf_sc%SC)
          ! print*,'rank',cfg%rank,'entering lp%advance with Yf_max,min:',maxval(Yf_sc%SC),minval(Yf_sc%SC)
+         ! print*,'enter lp_advance, wt=',print_wall_time()
          call lp%advance(dt=time%dt,U=resU,V=resV,W=resW,rho=rho,visc=visc,T=resT,Yf=resYf,lTab=lTab,gTab=gTab,p_therm=p0)
+         ! print*,'exit lp_advance,  wt=',print_wall_time()
+
          ! print*,'rank',cfg%rank,'max(srcM)',maxval(lp%srcM),'min(srcM)',minval(lp%srcM),'max(srcE)',maxval(lp%srcE),'min(srcE)',minval(lp%srcE)
          ! print*,'here2'
          if ((lp%np.eq.0).and.(time%t.gt.3.0_WP)) amDone=.true.
@@ -506,9 +562,10 @@ contains
          ! print*,'here3'
          ! Perform and output monitoring
          call lp%get_max()
-         print*,'enter sample'
-         call st%sample_stats(lp=lp,dt=time%dt)
-         print*,'exit sample'
+         
+         ! print*,'enter sample, wt=',print_wall_time()
+         call st%sample_stats(dt=time%dt)
+         ! print*,'exit sample,  wt=',print_wall_time()
          ! call fs%get_max()
          ! call Yf_sc%get_max()
          ! call T_sc%get_max()
@@ -521,83 +578,66 @@ contains
          !    call die('Dying now for forensic reasons')
          ! end block imDying
       end do
-      ! if (cfg%rank.eq.1) then
-      !    slow_down : block
-      !       integer :: i,j,k
-      !       real(WP) :: a,b,c
-      !       a = 1.0_WP
-      !       b = 2.0_WP
-      !       do i=1,1000
-      !          do j=1,1000
-      !             do k=1,1000
-      !                c = a*sqrt(b*i**2+j**2)
-      !             end do
-      !          end do
-      !       end do
-
-      !    end block slow_down
-      ! end if
-      ! print_stats : block
-      !    if (st%stats(1)%amIn) then
+      ! print_stats1 : block
+      ! use mpi_f08, only: MPI_Barrier
+      !    if (st%stats(1)%amRoot) then
+      !       print*,'U, station 1'
+      !       print*,st%stats(1)%vals(st%get_def('U'),:,:,:)
+      !       print*,'var(U), station 1'
+      !       print*,(st%stats(1)%vals(st%get_def('U^2'),:,:,:)-st%stats(1)%vals(st%get_def('U'),:,:,:)**2)
       !       print*,'Number, station 1'
-      !       print*,st%stats(1)%vals(1,:,:,:)
+      !       print*,st%stats(1)%vals(st%get_def('p_n'),:,:,:)
       !       print*,'Mean diameter [micron], station 1'
-      !       print*,st%stats(1)%vals(2,:,:,:)*1.0e6_WP
-      !       print*,'diameter varience [mm^2], station 1'
-      !       print*,st%stats(1)%vals(3,:,:,:)*1.0e6_WP
+      !       print*,st%stats(1)%vals(st%get_def('p_d'),:,:,:)*1.0e6_WP
+      !       print*,'diameter standard dev [micron], station 1'
+      !       print*,(st%stats(1)%vals(st%get_def('p_d^2'),:,:,:)-st%stats(1)%vals(st%get_def('p_d'),:,:,:)**2)*1.0e6_WP
       !    end if
-      !    if (st%stats(2)%amIn) then
+      !    call MPI_Barrier(cfg%comm)
+      !    if (st%stats(2)%amRoot) then
       !       print*,'Mean diameter [micron], station 2'
-      !       print*,st%stats(2)%vals(2,:,:,:)*1.0e6_WP
-      !       print*,'diameter varience [mm^2], station 2'
-      !       print*,st%stats(2)%vals(3,:,:,:)*1.0e6_WP
+      !       print*,st%stats(2)%vals(st%get_def('p_d'),:,:,:)*1.0e6_WP
+      !       print*,'diameter standard dev [micron], station 2'
+      !       print*,(st%stats(2)%vals(st%get_def('p_d^2'),:,:,:)-st%stats(2)%vals(st%get_def('p_d'),:,:,:)**2)*1.0e6_WP
       !    end if
-      !    if (st%stats(3)%amIn) then
+      !    call MPI_Barrier(cfg%comm)
+      !    if (st%stats(3)%amRoot) then
       !       print*,'Mean diameter [micron], station 3'
-      !       print*,st%stats(3)%vals(2,:,:,:)*1.0e6_WP
-      !       print*,'diameter varience [mm^2], station 3'
-      !       print*,st%stats(3)%vals(3,:,:,:)*1.0e6_WP
+      !       print*,st%stats(3)%vals(st%get_def('p_d'),:,:,:)*1.0e6_WP
+      !       print*,'diameter standard dev [micron], station 3'
+      !       print*,(st%stats(3)%vals(st%get_def('p_d^2'),:,:,:)-st%stats(3)%vals(st%get_def('p_d'),:,:,:)**2)*1.0e6_WP
       !    end if
-      ! end block print_stats
+      ! end block print_stats1
       call st%post_process()
-      if (cfg%rank.eq.1) then
-         slow_down2 : block
-            integer :: i,j,k
-            real(WP) :: a,b,c
-            a = 1.0_WP
-            b = 2.0_WP
-            do i=1,2000
-               do j=1,2000
-                  do k=1,2000
-                     c = a*sqrt(b*i**2+j**2)
-                  end do
-               end do
-            end do
 
-         end block slow_down2
-      end if
-      print_stats2 : block
-      if (st%stats(1)%amIn) then
-         print*,'Number, station 1'
-         print*,st%stats(1)%vals(1,:,:,:)
-         print*,'Mean diameter [micron], station 1'
-         print*,st%stats(1)%vals(2,:,:,:)*1.0e6_WP
-         print*,'diameter varience [mm^2], station 1'
-         print*,st%stats(1)%vals(3,:,:,:)*1.0e6_WP
-      end if
-      if (st%stats(2)%amIn) then
-         print*,'Mean diameter [micron], station 2'
-         print*,st%stats(2)%vals(2,:,:,:)*1.0e6_WP
-         print*,'diameter varience [mm^2], station 2'
-         print*,st%stats(2)%vals(3,:,:,:)*1.0e6_WP
-      end if
-      if (st%stats(3)%amIn) then
-         print*,'Mean diameter [micron], station 3'
-         print*,st%stats(3)%vals(2,:,:,:)*1.0e6_WP
-         print*,'diameter varience [mm^2], station 3'
-         print*,st%stats(3)%vals(3,:,:,:)*1.0e6_WP
-      end if
-      end block print_stats2
+      print_stats : block
+      use mpi_f08, only: MPI_Barrier
+         if (st%stats(1)%amRoot) then
+            print*,'U, station 1'
+            print*,st%stats(1)%vals(st%get_def('U'),:,:,:)
+            print*,'var(U), station 1'
+            print*,sqrt(st%stats(1)%vals(st%get_def('U^2'),:,:,:)-st%stats(1)%vals(st%get_def('U'),:,:,:)**2)
+            print*,'Number, station 1'
+            print*,st%stats(1)%vals(st%get_def('p_n'),:,:,:)
+            print*,'Mean diameter [micron], station 1'
+            print*,st%stats(1)%vals(st%get_def('p_d'),:,:,:)*1.0e6_WP
+            print*,'diameter standard dev [micron], station 1'
+            print*,sqrt(st%stats(1)%vals(st%get_def('p_d^2'),:,:,:)-st%stats(1)%vals(st%get_def('p_d'),:,:,:)**2)*1.0e6_WP
+         end if
+         call MPI_Barrier(cfg%comm)
+         if (st%stats(2)%amRoot) then
+            print*,'Mean diameter [micron], station 2'
+            print*,st%stats(2)%vals(st%get_def('p_d'),:,:,:)*1.0e6_WP
+            print*,'diameter standard dev [micron], station 2'
+            print*,sqrt(st%stats(2)%vals(st%get_def('p_d^2'),:,:,:)-st%stats(2)%vals(st%get_def('p_d'),:,:,:)**2)*1.0e6_WP
+         end if
+         call MPI_Barrier(cfg%comm)
+         if (st%stats(3)%amRoot) then
+            print*,'Mean diameter [micron], station 3'
+            print*,st%stats(3)%vals(st%get_def('p_d'),:,:,:)*1.0e6_WP
+            print*,'diameter standard dev [micron], station 3'
+            print*,sqrt(st%stats(3)%vals(st%get_def('p_d^2'),:,:,:)-st%stats(3)%vals(st%get_def('p_d'),:,:,:)**2)*1.0e6_WP
+         end if
+      end block print_stats
 
    end subroutine simulation_run
    
