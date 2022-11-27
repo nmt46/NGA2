@@ -45,6 +45,7 @@ examples/*/input*~
 !examples/*/README
 !examples/*/src
 !examples/*/*.py
+!examples/*/*.m
 !examples/*/*.sh
 !examples/nozzle_internal/cad
 !examples/nozzle_2phase/cad
