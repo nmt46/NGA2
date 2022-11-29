@@ -25,25 +25,28 @@ contains
       create_grid: block
          use sgrid_class, only: cartesian
          integer :: i,j,k,nx,ny,nz
-         real(WP) :: Lx,Ly,Lz
+         real(WP) :: Lx,Ly,Lz,Sx,Sy,Sz
          real(WP), dimension(:), allocatable :: x,y,z
          
          ! Read in grid definition
          call param_read('Lx',Lx); call param_read('nx',nx); allocate(x(nx+1))
          call param_read('Ly',Ly); call param_read('ny',ny); allocate(y(ny+1))
          call param_read('Lz',Lz); call param_read('nz',nz); allocate(z(nz+1))
-         
-         ! Create simple rectilinear grid
-         do i=1,nx+1
-            x(i)=real(i-1,WP)/real(nx,WP)*Lx
+
+         call param_read('Stretching in x', Sx)
+         call param_read('Stretching in y', Sy)
+         call param_read('Stretching in z', Sz)
+         ! Create stretched rectilinear grid
+         do i = 1, nx + 1
+            x(i) = Lx*(sinh(Sx*(real(i - 1, WP)/real(nx, WP)))/sinh(Sx))
+            end do
+            do j = 1, ny + 1
+            y(j) = 0.5_WP*Ly*(sinh(Sy*(real(j - 1, WP)/real(ny, WP) - 0.5_WP))/sinh(Sy*0.5_WP))
+            end do
+            do k = 1, nz + 1
+            z(k) = 0.5_WP*Lz*(sinh(Sz*(real(k - 1, WP)/real(nz, WP) - 0.5_WP))/sinh(Sz*0.5_WP))
          end do
-         do j=1,ny+1
-            y(j)=real(j-1,WP)/real(ny,WP)*Ly-0.5_WP*Ly
-         end do
-         do k=1,nz+1
-            z(k)=real(k-1,WP)/real(nz,WP)*Lz-0.5_WP*Lz
-         end do
-         
+
          ! General serial grid object
          grid=sgrid(coord=cartesian,no=2,x=x,y=y,z=z,xper=.false.,yper=.false.,zper=.false.,name='EvaporatingSpray')
          ! Add walls

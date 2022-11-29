@@ -318,6 +318,8 @@ contains
          call st%add_definition(name='p_U',   def='p_U')
          call st%add_definition(name='p_U^2', def='p_U*p_U')
          call st%add_definition(name='p_U*U', def='p_U*U')
+         call st%add_definition(name='p_rad', def='p_rad')
+         call st%add_definition(name='p_rad^2',def='p_rad*p_rad')
          ! Finalize initialization (really just allocating a couple arrays)
          call st%init_stats()
       end block initialize_stats

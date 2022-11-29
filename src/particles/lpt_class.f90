@@ -71,7 +71,7 @@ module lpt_class
       
       ! Solver parameters
       real(WP) :: nstep=1                                 !< Number of substeps (default=1)
-      real(WP) :: min_diam = 1e-6                         !< Minimum allowable particle diameter
+      real(WP), public :: min_diam = 3e-7                 !< Minimum allowable particle diameter
       
       ! Collisional parameters
       real(WP) :: Tcol                                    !< Characteristic collision time scale

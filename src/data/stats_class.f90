@@ -166,6 +166,7 @@ contains
         implicit none
         class(stats_parent) :: this
         character(len=*), intent(in) :: filename
+        character(len=18) :: the_date_time
         real(WP), dimension(:,:,:,:), allocatable :: globVals
         integer :: i,j,k,ierr,n,iLoc
         integer :: key,color,myRank
@@ -182,6 +183,9 @@ contains
         
         ! Christen the stats object
         call MPI_FILE_READ_ALL(ifile,this%name,str_medium,MPI_CHARACTER,status,ierr)
+
+        ! Dumping date and time into dummy variable
+        call MPI_FILE_READ_ALL(ifile,the_date_time,18,MPI_CHARACTER,status,ierr) 
 
         ! Get various counters
         call MPI_FILE_READ_ALL(ifile,this%nLoc,1,MPI_INTEGER,status,ierr)
@@ -536,6 +540,7 @@ contains
                 call MPI_Comm_rank(this%stats(iLoc)%comm,myRank,ierr)
                 if (myRank.eq.0) this%stats(iLoc)%amRoot = .true.
             end if
+            if (this%stats(iLoc)%amRoot) print*,this%stats(iLoc)%imin,this%stats(iLoc)%imax,this%stats(iLoc)%jmin,this%stats(iLoc)%jmax,this%stats(iLoc)%kmin,this%stats(iLoc)%kmax
         end if
             
     end subroutine add_station
@@ -677,7 +682,7 @@ contains
                 end if ! If already initialized from restart, don't overwrite
             end if
         end do
-        print*,'Successfully Initialized',this%nLoc,'Stations for Statistics'
+        if (this%cfg%amRoot) print*,'Successfully Initialized',this%nLoc,'Stations for Statistics'
     end subroutine init_stats
 
 
@@ -902,6 +907,8 @@ contains
         character(len=str_medium) :: filename
         integer :: i,j,k,iLoc,n,ierr,iunit
         real(WP), dimension(:,:,:,:), allocatable :: globVals
+        character(len=8) :: dateChar
+        character(len=10) :: timeChar
 
         ! Create our filename
         if (present(fdata)) then
@@ -919,6 +926,10 @@ contains
             !!!!!!!!! Write parent header info !!!!!!!!!
             ! Write name
             write(iunit) this%name
+            ! Write the date and time of writing
+            call date_and_time(date=dateChar,time=timeChar)
+            write(iunit) dateChar
+            write(iunit) timeChar
             ! Write nLoc
             write(iunit) this%nLoc
             ! Write nAr

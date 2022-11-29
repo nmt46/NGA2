@@ -4,6 +4,7 @@ module simulation
    use geometry,          only: cfg1,cfg2,amGrp1,amGrp2,grp1,grp2
    use lpt_class,         only: lpt
    use lowmach_class,     only: lowmach
+   use stats_class,       only: stats_parent
    use incomp_class,      only: incomp
    use vdscalar_class,    only: vdscalar
    use timetracker_class, only: timetracker
@@ -14,6 +15,8 @@ module simulation
    use fluidTable_class,  only: fluidTable
    use sgsmodel_class,    only: sgsmodel
    use coupler_class,     only: coupler
+   use datafile_class,    only: datafile
+   use string,            only: str_medium
    implicit none
    private
    
@@ -38,6 +41,14 @@ module simulation
 
    !> Coupler
    type(coupler)  :: cpl
+
+   !> Stats collection
+   type(stats_parent) :: st
+   type(event) :: stat_evt
+
+   !> Restarting
+   type(datafile) :: df1,df2
+   type(event) :: rst_evt
    
    !> Simulation monitor file
    type(monitor) :: mfile,pfile,cflFile,jetFile
@@ -53,7 +64,9 @@ module simulation
    real(WP) :: diff_T,diff_Yf ! non-turbulent diffusivities for scalar solvers
 
    real(WP) :: dp,dp_sig,r_inj,r_inj_sig,u_inj,u_inj_sig,T_d,inj_rate,r_jet,u_jet,T_jet,Yf_jet,u_coflow,T_coflow,Yf_coflow
-   real(WP) :: mdot_l,mdot_g,mInj ! liquid and gas fuel flow rates
+   real(WP) :: mdot_g ! Carrier gas flow rate
+   real(WP) :: mdot_l,mdot_f_g,mInj ! liquid and gas fuel flow rates; total fuel mass thus far injected
+   real(WP) :: drop_scale ! Scaling coefficient for parceling of droplets
    integer :: nInj
 
    !> Quantities for flow & scalar solvers:
@@ -69,7 +82,8 @@ module simulation
 
    type(fluidTable) :: lTab,gTab
 
-
+   ! Restarts
+   logical :: restarted
    
 contains
    
@@ -195,6 +209,79 @@ contains
       if (i.eq.pg%imin.and.(sqrt(pg%ym(j)**2+pg%zm(k)**2)).gt.r_jet) isIn = .true.
    end function coflow_locator
 
+   function station_0_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      real(WP) :: xLoc
+      logical :: isIn
+      isIn = .false.
+      xLoc = 0.5_WP*(r_jet*2.0_WP)
+      if (pg%xm(i).gt.xLoc.and.pg%xm(i).lt.xLoc+1.0_WP*pg%dx(i)) isIn = .true.
+   end function station_0_locator
+
+   function station_1_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      real(WP) :: xLoc
+      logical :: isIn
+      isIn = .false.
+      xLoc = 5.0_WP*(r_jet*2.0_WP)
+      if (pg%xm(i).gt.xLoc.and.pg%xm(i).lt.xLoc+1.0_WP*pg%dx(i)) isIn = .true.
+   end function station_1_locator
+
+   function station_2_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      real(WP) :: xLoc
+      logical :: isIn
+      isIn = .false.
+      xLoc = 10.0_WP*(r_jet*2.0_WP)
+      if (pg%xm(i).gt.xLoc.and.pg%xm(i).lt.xLoc+1.0_WP*pg%dx(i)) isIn = .true.
+   end function station_2_locator
+
+   function station_3_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      real(WP) :: xLoc
+      logical :: isIn
+      isIn = .false.
+      xLoc = 15.0_WP*(r_jet*2.0_WP)
+      if (pg%xm(i).gt.xLoc.and.pg%xm(i).lt.xLoc+1.0_WP*pg%dx(i)) isIn = .true.
+   end function station_3_locator
+
+   function station_4_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      real(WP) :: xLoc
+      logical :: isIn
+      isIn = .false.
+      xLoc = 20.0_WP*(r_jet*2.0_WP)
+      if (pg%xm(i).gt.xLoc.and.pg%xm(i).lt.xLoc+1.0_WP*pg%dx(i)) isIn = .true.
+   end function station_4_locator
+
+   function station_5_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      real(WP) :: xLoc
+      logical :: isIn
+      isIn = .false.
+      xLoc = 25.0_WP*(r_jet*2.0_WP)
+      if (pg%xm(i).gt.xLoc.and.pg%xm(i).lt.xLoc+1.0_WP*pg%dx(i)) isIn = .true.
+   end function station_5_locator
+
+
       !> Define here our equation of state - rho(T,mass)
    subroutine get_rho()
       implicit none
@@ -225,17 +312,22 @@ contains
       use coolprop
       use param, only: param_read
       implicit none
+      character(len=str_medium) :: lpt_name,stats_name
 
       read_global_vars : block
-         call param_read('Gas jet velocity',             u_jet); meanU = u_jet
+         character(len=str_medium) :: dir_restart
+
+         ! call param_read('Gas jet velocity',             u_jet); meanU = u_jet
          call param_read('Gas coflow velocity',          u_coflow)
          call param_read('Gas jet radius',               r_jet)
          call param_read('Pressure',                     p0)
          call param_read('Gas jet temperature',          T_jet)
          call param_read('Gas coflow temperature',       T_coflow)
-         call param_read('Gas jet fuel mass fraction',   Yf_jet)
+         ! call param_read('Gas jet fuel mass fraction',   Yf_jet)
          call param_read('Gas coflow fuel mass fraction',Yf_coflow)
-         call param_read('Gas fuel flow rate',           mdot_g); mdot_g=mdot_g/1000.0_WP !convert to kg
+         call param_read('Gas fuel flow rate',           mdot_f_g); mdot_f_g=mdot_f_g/60000.0_WP !convert to kg/s
+         call param_read('Carrier gas flow rate',        mdot_g); mdot_g=mdot_g/60000.0_WP !convert to kg/s
+         Yf_jet = mdot_f_g/(mdot_f_g+mdot_g)
 
          call param_read('Droplet mean diameter',              dp)
          call param_read('Droplet diameter standard deviation',dp_sig)
@@ -245,12 +337,18 @@ contains
          call param_read('Droplet mean velocity',              u_inj)
          call param_read('Droplet velocity standard deviation',u_inj_sig)
          ! call param_read('Droplet injection rate',             inj_rate)
-         call param_read('Droplet fuel flow rate',             mdot_l); mdot_l=mdot_l/1000.0_WP !convert to kg
+         call param_read('Droplet fuel flow rate',             mdot_l); mdot_l=mdot_l/60000.0_WP !convert to kg/s
+         call param_read('Droplet number scaling',             drop_scale)
 
          call param_read('Thermal diffusivity',diff_T)
          call param_read('Fuel diffusivity',   diff_Yf)
+
+         call param_read(tag='Restart from',val=dir_restart,short='r',default='')
+         restarted=.false.; if (len_trim(dir_restart).gt.0) restarted=.true.
       end block read_global_vars
 
+
+      if (cfg1%amRoot) print*,'init1'
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       !!!!!!!!!!!!!!!!!!!!!! Initialize fluid properties !!!!!!!!!!!!!!!!!!!!!!!!
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -311,10 +409,26 @@ contains
 
       end block initialize_fluid_properties
 
+      if (cfg1%amRoot) print*,'init2'
+      ! Overwrite u_jet to ensure we meet the mass flows now that we have fuel/gas properties
+      ! Do this out in the open so every process has new meanU/u_jet
+      set_jet_velocity : block
+         use mathtools, only: Pi
+         real(WP) :: rho_in,W_l,W_g,R_cst
+         R_cst = 8.314472_WP ! Gas constant [J/(kg*K)]
+         W_g = gTab%MW ! Carrier gas molar weight [kg/mol]
+         W_l = lTab%MW ! Drop molar weight [kg/mol]
+
+         rho_in = p0/(R_cst*(Yf_jet/W_l+(1.0_WP-Yf_jet)/W_g)*T_jet)
+         u_jet = (mdot_f_g+mdot_g)/(rho_in*Pi*r_jet**2)
+         meanU = u_jet ! Reset the mean velocity (for forcing function)
+         if (cfg1%amRoot) print*,'meanU',meanU
+      end block set_jet_velocity
+
+      if (cfg1%amRoot) print*,'init3'
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!! Create Coupler !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
 
       ! Both groups prepare the coupler
       if (amGrp1.or.amGrp2) then
@@ -328,9 +442,10 @@ contains
       end if
 
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-      !!!!!!!!!!!!!!!!!!! Initialize jet development solvers !!!!!!!!!!!!!!!!!!!!
+      !!!!!!!!!!!!!!!!!!!!!!!!!!! Deal with restarts !!!!!!!!!!!!!!!!!!!!!!!!!!!!
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+      ! First, initialize our timetrackers before we deal with any restarting shenanigans
       if (amGrp2) then
          initialize_timetracker2: block
             time2=timetracker(amRoot=cfg2%amRoot)
@@ -340,9 +455,78 @@ contains
             time2%dt=min(time2%dtmax,0.1_WP*cfg2%dx(1)/u_jet)
             time2%itmax=2
          end block initialize_timetracker2
+      end if
 
+      if (amGrp1) then
+         ! Initialize time tracker with 1 subiterations
+         initialize_timetracker1: block
+            time1=timetracker(amRoot=cfg1%amRoot)
+            call param_read('Max timestep size',time1%dtmax)
+            call param_read('Max cfl number',time1%cflmax)
+            call param_read('Max time',time1%tmax)
+            time1%dt=0.1_WP*cfg1%dx(1)/u_jet
+            ! time1%dt=time1%dtmax
+            time1%itmax=2
+         end block initialize_timetracker1
+      end if
+      
+      if (amGrp2.or.amGrp1) then
+         ! Restart if needed
+         restart_sim : block
+            character(len=str_medium) :: dir_restart
+            ! Create event for restarting based on our timetracker
+            rst_evt=event(time1,'Restart output')
+            call param_read('Restart output period',rst_evt%tper)
+            call param_read(tag='Restart from',val=dir_restart,short='r',default='')
+            if (restarted) then
+               ! Pull datafile1
+               df1 = datafile(pg=cfg1,fdata=trim(adjustl(dir_restart))//'/'//'data1')
+               ! Set names
+               stats_name = trim(adjustl(dir_restart))//'/'//'data.stats'
+               lpt_name=trim(adjustl(dir_restart))//'/'//'data.lpt'
+               ! Set timetracker t, dt
+               call df1%pullval(name='t', val=time1%t)
+               call df1%pullval(name='dt',val=time1%dt)
+               ! Pull datafile2
+               if (amGrp2) then
+                  df2 = datafile(pg=cfg2,fdata=trim(adjustl(dir_restart))//'/'//'data2')
+                  call df2%pullval(name='t', val=time2%t)
+                  call df2%pullval(name='dt',val=time2%dt)
+               end if
+            else ! Otherwise, let's get the datafile set up
+               df1 = datafile(pg=cfg1,filename=trim(cfg1%name),nval=4,nvar=5)
+               df1%valname(1)='t'
+               df1%valname(2)='dt'
+               df1%valname(3)='nInj'
+               df1%valname(4)='mInj'
+               df1%varname(1)='rhoU'
+               df1%varname(2)='rhoV'
+               df1%varname(3)='rhoW'
+               df1%varname(4)='Yf_sc'
+               df1%varname(5)='T_sc'
+               if (amGrp2) then
+                  df2 = datafile(pg=cfg2,filename=trim(cfg2%name),nval=2,nvar=3)
+                  df2%valname(1)='t'
+                  df2%valname(2)='dt'
+                  df2%varname(1)='U'
+                  df2%varname(2)='V'
+                  df2%varname(3)='W'
+               end if
+            end if
+         end block restart_sim
 
+         init_stat_cache : block
+            stat_evt=event(time1,'Statistics Output')
+            call param_read('Statistics output period',stat_evt%tper)
+         end block init_stat_cache
 
+      end if
+
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      !!!!!!!!!!!!!!!!!!! Initialize jet development solvers !!!!!!!!!!!!!!!!!!!!
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+      if (amGrp2) then
          initialize_res2: block
             allocate(resU2 (cfg2%imino_:cfg2%imaxo_,cfg2%jmino_:cfg2%jmaxo_,cfg2%kmino_:cfg2%kmaxo_)); resU2=0.0_WP
             allocate(resV2 (cfg2%imino_:cfg2%imaxo_,cfg2%jmino_:cfg2%jmaxo_,cfg2%kmino_:cfg2%kmaxo_)); resV2=0.0_WP
@@ -383,34 +567,41 @@ contains
             fs2%psolv%maxlevel=16
             call fs2%setup(pressure_ils=pcg_amg,implicit_ils=gmres_amg) ! had pressure as pcg_amg
 
-            ! Initialize velocity field
-            fs2%U = 0.0_WP
-            fs2%V = 0.0_WP
-            fs2%W = 0.0_WP
-            do k=cfg2%kmino_,cfg2%kmaxo_
-               do j=cfg2%jmino_,cfg2%jmaxo_
-                  do i=cfg2%imino_,cfg2%imaxo_
-                     ! if (cfg2%VF(i,j,k).eq.1.0_WP) fs2%U(i,j,k)=u_jet!*(1.0_WP+0.1_WP*cos(twoPi*3*sqrt(cfg2%ym(j)**2+cfg2%zm(k)**2)/r_jet))!*(1+random_normal(0.0_WP,u_jet/100.0_WP))
-                     if (cfg2%VF(i,j,k).eq.1.0_WP) then
-                        if (fs2%cfg%nz.eq.1) then ! Use static turbulent mean flow approximation for 2D
-                           myN = 5.0_WP ! order of mean flow approximation
-                           a = u_jet/(r_jet**myN*(1/(myN+1)-1))
-                           b = -a*r_jet**myN
-                           fs2%U(i,j,k) = a*abs(fs2%cfg%ym(j))**myN+b
-                        elseif (fs2%cfg%ny.eq.1) then ! Use static turbulent mean flow approximation for 2D
-                           myN = 7.0_WP ! order of mean flow approximation
-                           a = u_jet/(r_jet**myN*(1/(myN+1)-1))
-                           b = -a*r_jet**myN
-                           fs2%U(i,j,k) = a*abs(fs2%cfg%zm(k))**myN+b
-                        else
-                           r = sqrt(r_jet*sin((cfg2%xm(i)-cfg2%xm(cfg2%nx/2))/r_jet)**2+cfg2%ym(j)**2+cfg2%zm(k)**2)/r_jet
-                           fs2%U(i,j,k) = u_jet*(1.0_WP+2.0_WP*exp(-r*5.0_WP)*cfg2%ym(j)/r_jet)
-                           fs2%V(i,j,k) = u_jet*(      -2.0_WP*exp(-r*5.0_WP)*sin((cfg2%xm(i)-cfg2%xm(cfg2%nx/2))/r_jet))   
+            if (restarted) then
+               call df2%pullvar(name='U',var=fs2%U)
+               call df2%pullvar(name='V',var=fs2%V)
+               call df2%pullvar(name='W',var=fs2%W)
+            else
+               ! Initialize velocity field
+               fs2%U = 0.0_WP
+               fs2%V = 0.0_WP
+               fs2%W = 0.0_WP
+               
+               do k=cfg2%kmino_,cfg2%kmaxo_
+                  do j=cfg2%jmino_,cfg2%jmaxo_
+                     do i=cfg2%imino_,cfg2%imaxo_
+                        ! if (cfg2%VF(i,j,k).eq.1.0_WP) fs2%U(i,j,k)=u_jet!*(1.0_WP+0.1_WP*cos(twoPi*3*sqrt(cfg2%ym(j)**2+cfg2%zm(k)**2)/r_jet))!*(1+random_normal(0.0_WP,u_jet/100.0_WP))
+                        if (cfg2%VF(i,j,k).eq.1.0_WP) then
+                           if (fs2%cfg%nz.eq.1) then ! Use static turbulent mean flow approximation for 2D
+                              myN = 5.0_WP ! order of mean flow approximation
+                              a = u_jet/(r_jet**myN*(1/(myN+1)-1))
+                              b = -a*r_jet**myN
+                              fs2%U(i,j,k) = a*abs(fs2%cfg%ym(j))**myN+b
+                           elseif (fs2%cfg%ny.eq.1) then ! Use static turbulent mean flow approximation for 2D
+                              myN = 7.0_WP ! order of mean flow approximation
+                              a = u_jet/(r_jet**myN*(1/(myN+1)-1))
+                              b = -a*r_jet**myN
+                              fs2%U(i,j,k) = a*abs(fs2%cfg%zm(k))**myN+b
+                           else
+                              r = sqrt(r_jet*sin((cfg2%xm(i)-cfg2%xm(cfg2%nx/2))/r_jet)**2+cfg2%ym(j)**2+cfg2%zm(k)**2)/r_jet
+                              fs2%U(i,j,k) = u_jet*(1.0_WP+2.0_WP*exp(-r*5.0_WP)*cfg2%ym(j)/r_jet)
+                              fs2%V(i,j,k) = u_jet*(      -2.0_WP*exp(-r*5.0_WP)*sin((cfg2%xm(i)-cfg2%xm(cfg2%nx/2))/r_jet))   
+                           end if
                         end if
-                     end if
+                     end do
                   end do
                end do
-            end do
+            end if
             ! check_vel: block
             !    use mpi_f08,  only: MPI_SUM,MPI_ALLREDUCE
             !    use parallel, only: MPI_REAL_WP
@@ -455,23 +646,13 @@ contains
       !!!!!!!!!!!!!!!!!! Initialize spray evaporation solvers !!!!!!!!!!!!!!!!!!!
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       if (amGrp1) then
-         ! Initialize time tracker with 1 subiterations
-         initialize_timetracker1: block
-            time1=timetracker(amRoot=cfg1%amRoot)
-            call param_read('Max timestep size',time1%dtmax)
-            call param_read('Max cfl number',time1%cflmax)
-            call param_read('Max time',time1%tmax)
-            time1%dt=0.1_WP*cfg1%dx(1)/u_jet
-            ! time1%dt=time1%dtmax
-            time1%itmax=2
-         end block initialize_timetracker1
-      
+         print*,'init1_0'
          ! Initialize our LPT
          initialize_lpt: block
             use fluidTable_class, only: rho_ID
             use mathtools, only: Pi,twoPi
             use random, only: random_normal,random_uniform
-            real(WP) :: theta
+            real(WP) :: theta,buf
             integer :: i,np
             ! Create solver
             lp=lpt(cfg=cfg1,name='LPT')         
@@ -479,14 +660,24 @@ contains
             call lTab%evalProps(propOut=lp%rho,T_q=T_d,P_q=p0,propID=rho_ID)
             ! Set filter scale to 3.5*dx
             lp%filter_width=3.5_WP*cfg1%min_meshsize
-            nInj = 0
-            mInj = 0.0_WP
+            lp%min_diam = dp/sqrt(1000.0_WP) ! Kill drops when the reach 1/1000th the initial area
             ! Adjust injection rate for cell widths in 2D cases
             if (lp%cfg%ny.eq.1) then
                mdot_l = mdot_l*lp%cfg%dy(1)*2.0_WP/(Pi*r_inj)
             elseif (lp%cfg%nz.eq.1) then
                mdot_l = mdot_l*lp%cfg%dz(1)*2.0_WP/(Pi*r_inj)
             end if
+
+            ! Handle Restarts
+            if (restarted) then
+               call lp%read(filename=trim(lpt_name))
+               call df1%pullval(name='nInj',val=buf); nInj=int(buf)
+               call df1%pullval(name='mInj',val=mInj)
+            else
+               nInj = 0
+               mInj = 0.0_WP
+            end if
+
             ! Distribute particles
             call lp%sync()
             ! Get initial particle volume fraction
@@ -494,7 +685,7 @@ contains
             ! Set collision timescale
             lp%Tcol=5.0_WP*time1%dt
          end block initialize_lpt
-         
+         print*,'init1_1'
 
          initialize_res1: block
             allocate(resU1 (cfg1%imino_:cfg1%imaxo_,cfg1%jmino_:cfg1%jmaxo_,cfg1%kmino_:cfg1%kmaxo_)); resU1=0.0_WP
@@ -546,34 +737,43 @@ contains
             call T_sc%setup(implicit_ils=gmres_amg)
             call Yf_sc%setup(implicit_ils=gmres_amg)
             ! Set initial field values
+            print*,'init1_3'
             T_sc%SC=T_coflow
-            Yf_sc%SC=Yf_coflow
-            call T_sc%get_bcond('T_jet',mybc)
-            do n=1,mybc%itr%no_
-               i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-               T_sc%SC(i,j,k)=T_jet
-            end do
-            call T_sc%get_bcond('T_coflow',mybc)
-            do n=1,mybc%itr%no_
-               i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-               T_sc%SC(i,j,k)=T_coflow
-            end do
-            call Yf_sc%get_bcond('Yf_jet',mybc)
-            do n=1,mybc%itr%no_
-               i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-               Yf_sc%SC(i,j,k)=Yf_jet
-            end do
-            call Yf_sc%get_bcond('Yf_coflow',mybc)
-            do n=1,mybc%itr%no_
-               i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-               Yf_sc%SC(i,j,k)=Yf_coflow
-            end do
+            Yf_sc%SC=Yf_coflow            
+            if (restarted) then
+               call df1%pullvar(name='T_sc', var=T_sc%SC)
+               call df1%pullvar(name='Yf_sc',var=Yf_sc%SC)
+            else
+               call T_sc%get_bcond('T_jet',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  T_sc%SC(i,j,k)=T_jet
+               end do
+               call T_sc%get_bcond('T_coflow',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  T_sc%SC(i,j,k)=T_coflow
+               end do
+               call Yf_sc%get_bcond('Yf_jet',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  Yf_sc%SC(i,j,k)=Yf_jet
+               end do
+               call Yf_sc%get_bcond('Yf_coflow',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  Yf_sc%SC(i,j,k)=Yf_coflow
+               end do
+            end if
+            print*,'init1_4'
+            print*,'min,maxT,Yf',minval(T_sc%SC),maxval(T_sc%SC),minval(Yf_sc%SC),maxval(Yf_sc%SC)
             call get_rho()
+            print*,'init1_5'
             ! Set diffusivities
             T_sc%diff = diff_T
             Yf_sc%diff = diff_Yf
          end block initialize_sc
-
+         print*,'init1_6'
          ! Initialize the flow solver
          initialize_fs1: block
             use mathtools, only: twoPi
@@ -601,39 +801,49 @@ contains
             call param_read('Implicit tolerance',fs1%implicit%rcvg)
             ! Setup the solver
             call fs1%setup(pressure_ils=pcg_amg,implicit_ils=gmres_amg)
-
+            print*,'init1_7'
             ! Initialize velocity field
-            do k=lp%cfg%kmino_,lp%cfg%kmaxo_
-               do j=lp%cfg%jmino_,lp%cfg%jmaxo_
-                  do i=lp%cfg%imino_,lp%cfg%imaxo_
-                     fs1%U(i,j,k)=0.0_WP;fs1%rhoU(i,j,k)=0.0_WP
-                     ! if(sqrt(fs1%cfg%ym(j)**2+fs1%cfg%zm(k)**2).le.r_jet) then
-                     !    fs1%U(i,j,k)=u_jet
-                     ! else
-                     !    fs1%U(i,j,k)=0.0_WP
-                     ! end if
-                     ! fs1%rhoU(i,j,k)=fs1%U(i,j,k)*fs1%rho(i,j,k)
-                     fs1%V(i,j,k)=0.0_WP;fs1%rhoV(i,j,k)=0.0_WP
-                     fs1%W(i,j,k)=0.0_WP;fs1%rhoW(i,j,k)=0.0_WP
+            if (restarted) then
+               call df1%pullvar(name='rhoU',var=fs1%rhoU)
+               call df1%pullvar(name='rhoV',var=fs1%rhoV)
+               call df1%pullvar(name='rhoW',var=fs1%rhoW)
+               call fs1%rho_divide()
+            else
+               do k=lp%cfg%kmino_,lp%cfg%kmaxo_
+                  do j=lp%cfg%jmino_,lp%cfg%jmaxo_
+                     do i=lp%cfg%imino_,lp%cfg%imaxo_
+                        fs1%U(i,j,k)=0.0_WP;fs1%rhoU(i,j,k)=0.0_WP
+                        ! if(sqrt(fs1%cfg%ym(j)**2+fs1%cfg%zm(k)**2).le.r_jet) then
+                        !    fs1%U(i,j,k)=u_jet
+                        ! else
+                        !    fs1%U(i,j,k)=0.0_WP
+                        ! end if
+                        ! fs1%rhoU(i,j,k)=fs1%U(i,j,k)*fs1%rho(i,j,k)
+                        fs1%V(i,j,k)=0.0_WP;fs1%rhoV(i,j,k)=0.0_WP
+                        fs1%W(i,j,k)=0.0_WP;fs1%rhoW(i,j,k)=0.0_WP
+                     end do
                   end do
                end do
-            end do
-            call fs1%get_bcond('gas_inj',mybc)
+
+               call fs1%get_bcond('gas_inj',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  fs1%rhoU(i,j,k)=u_jet*fs1%rho(i,j,k)
+                  fs1%U(i,j,k)   =u_jet
+               end do
+               call fs1%get_bcond('gas_coflow',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  fs1%rhoU(i,j,k)=u_coflow*fs1%rho(i,j,k)
+                  fs1%U(i,j,k)   =u_coflow
+               end do
+            end if
+            print*,'init1_7'
             !!!!!!!!!!!!!!!!! Allocate storage of passed velocties !!!!!!!!!!!!!!!!!
+            call fs1%get_bcond('gas_inj',mybc)
             allocate(passUVW(3,mybc%itr%no_))
             !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-            do n=1,mybc%itr%no_
-               i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-               fs1%rhoU(i,j,k)=u_jet*fs1%rho(i,j,k)
-               fs1%U(i,j,k)   =u_jet
-            end do
-            call fs1%get_bcond('gas_coflow',mybc)
-            do n=1,mybc%itr%no_
-               i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-               fs1%rhoU(i,j,k)=u_coflow*fs1%rho(i,j,k)
-               fs1%U(i,j,k)   =u_coflow
-            end do
             call fs1%apply_bcond(time1%t,time1%dt)
             call T_sc%get_drhodt(drhodt=resT,dt=time1%dt) ! use resT to hold our drhodt :)
             call fs1%get_div(drhodt=resT)
@@ -647,6 +857,48 @@ contains
          create_sgs1: block
             sgs1=sgsmodel(cfg=fs1%cfg,umask=fs1%umask,vmask=fs1%vmask,wmask=fs1%wmask)
          end block create_sgs1
+
+         ! Create our stats gathering
+         create_stats: block
+            use messager, only: die
+            st = stats_parent(cfg=cfg1,name='Particle Stats')
+            if (restarted) call st%restart_from_file(stats_name)
+            ! Add our stations
+            call st%add_station(name='x/D=0.5',dim='yz', locator=station_0_locator)
+            call st%add_station(name='x/D=5',  dim='yz', locator=station_1_locator)
+            call st%add_station(name='x/D=10', dim='yz', locator=station_2_locator)
+            call st%add_station(name='x/D=15', dim='yz', locator=station_3_locator)
+            call st%add_station(name='x/D=20', dim='yz', locator=station_4_locator)
+            call st%add_station(name='x/D=25', dim='yz', locator=station_5_locator)
+            ! Add pointers to eulerian arrays
+            call st%add_array(name='U', array=fs1%U)
+            call st%add_array(name='V', array=fs1%V)
+            call st%add_array(name='W', array=fs1%W)
+            call st%add_array(name='T', array=T_sc%SC)
+            call st%add_array(name='Yf',array=Yf_sc%SC)
+            ! Add pointer to lp solver
+            call st%set_lp(lp=lp)
+            ! Add definitions for stats in terms of arrays and lp properties
+            call st%add_definition(name='U',     def='U')
+            call st%add_definition(name='U^2',   def='U*U')
+            call st%add_definition(name='T',     def='T')
+            call st%add_definition(name='T^2',   def='T*T')
+            call st%add_definition(name='Yf',    def='Yf')
+            call st%add_definition(name='Yf^2',  def='Yf*Yf')
+            call st%add_definition(name='p_d',   def='p_d')
+            call st%add_definition(name='p_d^2', def='p_d*p_d')
+            call st%add_definition(name='p_d^3', def='p_d*p_d*p_d')
+            call st%add_definition(name='p_T',   def='p_T')
+            call st%add_definition(name='p_U',   def='p_U')
+            call st%add_definition(name='p_U^2', def='p_U*p_U')
+            call st%add_definition(name='p_rad', def='p_rad') ! Radial velocity of particle
+            call st%add_definition(name='p_rad^2',def='p_rad*p_rad')
+            ! Finalize initialization (really just allocating a couple arrays)
+            call st%init_stats()
+
+         end block create_stats
+
+
       end if
       
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -1034,7 +1286,6 @@ contains
                ! Explicit calculation of drhoSC/dt from scalar equation
                call T_sc%get_drhoSCdt(resT,fs1%rhoU,fs1%rhoV,fs1%rhoW)
                call Yf_sc%get_drhoSCdt(resYf,fs1%rhoU,fs1%rhoV,fs1%rhoW)
-               ! print*,'here0A',time1%it,max(maxval(fs1%U),maxval(fs1%V),maxval(fs1%W))
 
                ! Assemble explicit residual            
                resT=time1%dt*resT-(2.0_WP*T_sc%rho*T_sc%SC-(T_sc%rho+T_sc%rhoold)*T_sc%SCold)
@@ -1056,13 +1307,13 @@ contains
                         do i=fs1%cfg%imin_,fs1%cfg%imax_
                            ! Need in SC*kg/m^3
                            call gTab%evalProps(propOut=Cp_g,T_q=T_sc%SC(i,j,k),P_q=p0,propID=Cp_ID)
-                           resT(i,j,k)=resT(i,j,k)+lp%srcE(i,j,k)/Cp_g!/cfg1%vol(i,j,k)
-                           resYf(i,j,k)=resYf(i,j,k)+lp%srcM(i,j,k)!/cfg1%vol(i,j,k) ! *Yf_sc%rho(i,j,k)
+                           resT(i,j,k)=resT(i,j,k)+lp%srcE(i,j,k)/Cp_g*drop_scale!/cfg1%vol(i,j,k)
+                           resYf(i,j,k)=resYf(i,j,k)+lp%srcM(i,j,k)*drop_scale!/cfg1%vol(i,j,k) ! *Yf_sc%rho(i,j,k)
                         end do
                      end do
                   end do
                end block add_mass_energy_src
-               ! print*,'here0B'
+
                ! Form implicit residual
                call T_sc%solve_implicit(time1%dt,resT,fs1%rhoU,fs1%rhoV,fs1%rhoW)
                call Yf_sc%solve_implicit(time1%dt,resYf,fs1%rhoU,fs1%rhoV,fs1%rhoW)
@@ -1131,13 +1382,12 @@ contains
 
                ! Update density
                call get_rho()
-               T_sc%rho = T_sc%rho+lp%srcM
-               Yf_sc%rho = Yf_sc%rho+lp%srcM
+               T_sc%rho = T_sc%rho+lp%srcM*drop_scale
+               Yf_sc%rho = Yf_sc%rho+lp%srcM*drop_scale
                ! print*,'here0E',time1%it,max(maxval(fs1%U),maxval(fs1%V),maxval(fs1%W))
                ! Rescale scalar for conservation
                ! T_sc%SC=resT/T_sc%rho
                ! Yf_sc%SC=resYf/Yf_sc%rho
-
                ! UPDATE THE VISCOSITY & APPLY SUBGRID MODELING
                update_visc_sgs: block
                   use fluidTable_class, only: mu_ID
@@ -1192,14 +1442,13 @@ contains
                   do k=fs1%cfg%kmin_,fs1%cfg%kmax_
                      do j=fs1%cfg%jmin_,fs1%cfg%jmax_
                         do i=fs1%cfg%imin_,fs1%cfg%imax_
-                           resU1(i,j,k)=resU1(i,j,k)+sum(fs1%itpr_x(:,i,j,k)*lp%srcU(i-1:i,j,k)) 
-                           resV1(i,j,k)=resV1(i,j,k)+sum(fs1%itpr_y(:,i,j,k)*lp%srcV(i,j-1:j,k))
-                           resW1(i,j,k)=resW1(i,j,k)+sum(fs1%itpr_z(:,i,j,k)*lp%srcW(i,j,k-1:k))
+                           resU1(i,j,k)=resU1(i,j,k)+sum(fs1%itpr_x(:,i,j,k)*lp%srcU(i-1:i,j,k)*drop_scale) 
+                           resV1(i,j,k)=resV1(i,j,k)+sum(fs1%itpr_y(:,i,j,k)*lp%srcV(i,j-1:j,k)*drop_scale)
+                           resW1(i,j,k)=resW1(i,j,k)+sum(fs1%itpr_z(:,i,j,k)*lp%srcW(i,j,k-1:k)*drop_scale)
                         end do
                      end do
                   end do
                end block add_lpt_src
-               ! print*,'here0G',time1%it,max(maxval(fs1%U),maxval(fs1%V),maxval(fs1%W))
                ! Form implicit residuals
                call fs1%solve_implicit(time1%dtmid,resU1,resV1,resW1)
                ! print*,'here0H',time1%it,max(maxval(fs1%U),maxval(fs1%V),maxval(fs1%W)),'rhoU',maxval(fs1%rhoU),'resU1',maxval(resU1)
@@ -1242,8 +1491,8 @@ contains
 
                ! Solve Poisson equation
                call Yf_sc%get_drhodt(dt=time1%dt,drhodt=resYf)
-               call fs1%correct_mfr(drhodt=(resYf + fs1%cfg%vol*lp%srcM/time1%dtmid))
-               call fs1%get_div(drhodt=(resYf + fs1%cfg%vol*lp%srcM/time1%dtmid))
+               call fs1%correct_mfr(drhodt=(resYf + fs1%cfg%vol*lp%srcM/time1%dtmid*drop_scale))
+               call fs1%get_div(drhodt=(resYf + fs1%cfg%vol*lp%srcM/time1%dtmid*drop_scale))
                fs1%psolv%rhs=-fs1%cfg%vol*fs1%div/time1%dtmid
                fs1%psolv%sol=0.0_WP
                call fs1%psolv%solve()
@@ -1275,7 +1524,7 @@ contains
                real(WP) :: r,theta,t_0,mNext
                t_0=0.0_WP!(4.0_WP*r_jet/u_jet)
                if (lp%cfg%amRoot.and.(time1%t.gt.t_0)) then
-                  mNext = mdot_l*(time1%t-t_0)
+                  mNext = mdot_l*(time1%t-t_0)/drop_scale
                   ! print*,'mNext',mNext,'mdot_l',mdot_l,'time1%t',time1%t,'t_0',t_0
                   do while(mInj.lt.mNext)
                      ! print*,'inject0a'
@@ -1360,6 +1609,38 @@ contains
                   end block ensight_output1
             end if
 
+            if (rst_evt%occurs()) then
+               save_restart : block
+                  character(len=str_medium) :: dirname,timestamp
+                  ! Prefix for files
+                  dirname='restart_'; write(timestamp,'(es12.5)') time1%t
+                  ! Prepare a new directory
+                  if (cfg1%amRoot) call execute_command_line('mkdir -p '//trim(adjustl(dirname))//trim(adjustl(timestamp)))
+                  call st%write(fdata=trim(adjustl(dirname))//trim(adjustl(timestamp))//'/'//'data.stats')
+                  call lp%write(filename=trim(adjustl(dirname))//trim(adjustl(timestamp))//'/'//'data.lpt')
+
+                  call df1%pushval(name='t',  val=time1%t)
+                  call df1%pushval(name='dt', val=time1%dt)
+                  call df1%pushval(name='nInj',val=real(nInj,WP))
+                  call df1%pushval(name='mInj',val=mInj)
+                  call df1%pushvar(name='rhoU',var=fs1%rhoU)
+                  call df1%pushvar(name='rhoV',var=fs1%rhoV)
+                  call df1%pushvar(name='rhoW',var=fs1%rhoW)
+                  call df1%pushvar(name='Yf_sc',var=Yf_sc%SC)
+                  call df1%pushvar(name='T_sc', var=T_sc%SC)
+                  call df1%write(fdata=trim(adjustl(dirname))//trim(adjustl(timestamp))//'/'//'data1')
+
+                  if (amGrp2) then
+                     call df2%pushval(name='t', val=time2%t)
+                     call df2%pushval(name='dt',val=time2%dt)
+                     call df2%pushvar(name='U', var=fs2%U)
+                     call df2%pushvar(name='V', var=fs2%V)
+                     call df2%pushvar(name='W', var=fs2%W)
+                     call df2%write(fdata=trim(adjustl(dirname))//trim(adjustl(timestamp))//'/'//'data2')
+                  end if
+               end block save_restart
+            end if
+
             ! print*,'here3'
             ! Perform and output monitoring
             call lp%get_max()
@@ -1369,8 +1650,27 @@ contains
             call cflFile%write()
             call mfile%write()
             call pfile%write()
+            call st%sample_stats(dt=time1%dt)
+
+            if (stat_evt%occurs()) then
+               cache_stats : block
+                  use messager, only: die
+                  use mpi_f08, only: MPI_Barrier
+                  character(len=str_medium) :: dirname,timestamp
+                  ! File pathnames
+                  dirname='stats_cache/stat_'; write(timestamp,'(es12.5)') time1%t
+                  ! Prepare the directory
+                  if (cfg1%amRoot) call execute_command_line('mkdir -p '//trim(adjustl(dirname))//trim(adjustl(timestamp)))
+                  call st%write(fdata=trim(adjustl(dirname))//trim(adjustl(timestamp))//'/'//'data.stats')
+                  call MPI_Barrier(cfg1%comm)
+                  call die('Forensic stop')
+               end block cache_stats
+            end if
+
             ! print*,'here4'
          end if
+
+               
       end do
    end subroutine simulation_run
    
