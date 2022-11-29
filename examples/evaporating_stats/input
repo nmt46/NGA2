@@ -25,25 +25,24 @@ nz2 :  1
 # Case definition
 Droplet mean diameter :                 6e-6 ! This distribution corresponds very well with the d32, d30, d20, d10 reported in the paper
 Droplet diameter standard deviation :   4.307e-6
-Droplet injection radius :              4.95e-3   ! The radius of the circle in which droplets are injected
+Droplet injection radius :              4.9e-3   ! The radius of the circle in which droplets are injected
 Injection radius standard deviation :   0
 Droplet mean velocity :                 20
 Droplet velocity standard deviation :   0.1
-Droplet temperature :                   283
+Droplet temperature :                   250
 Droplet fuel flow rate :                1.1 ! g/min
 Droplet number scaling :                1 !
 
-Gas jet temperature :                   300
-Gas coflow temperature :                300
+Gas jet temperature :                   275
+Gas coflow temperature :                298
 Gas coflow fuel mass fraction :         0
 Gas fuel flow rate :                    5.9 ! g/min
 Carrier gas flow rate:                  135 ! g/min
 
-Gas jet radius:                         5.25e-3
-Gas jet velocity:                       24
-Gas coflow velocity :                   4.32
+Gas jet radius:                         4.9e-3
+Gas coflow velocity :                   3
 
-Fuel :                                  ethanol
+Fuel :                                  ACETONE
 Fuel-gas Schmidt number:                0.7
 Gas :                                   air
 Gas Prandtl number:                     0.7
@@ -72,4 +71,4 @@ Ensight output period : 0.0001
 # Restart and save
 Restart output period : 6e-4
 Statistics output period : 1e-3 ! This is for separate statistics output from restarts
-Restart from :          restart_6.02437E-04!restart_2.00016E-02
+Restart from :          !restart_2.00016E-02

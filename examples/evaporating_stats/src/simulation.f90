@@ -355,7 +355,7 @@ contains
 
       initialize_fluid_properties: block
          ! use messager, only : die
-         use string,    only: str_medium
+         use string,    only: str_medium,lowercase
          use fluidTable_class, only: Cp_ID,Lv_ID,Tb_ID,rho_ID,MW_ID,mu_ID
          character(len=str_medium) :: name
          integer :: i,j,nP,nT
@@ -368,7 +368,7 @@ contains
 
          lTab=fluidTable(name=name)
 
-         Tmin = maxval([250.0_WP,1.01_WP*cprop(output='Tmin'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))]); 
+         Tmin = maxval([220.0_WP,1.01_WP*cprop(output='Tmin'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))]); 
          Tmax = 0.999_WP*cprop(output='T'//char(0),name1='P'//char(0),prop1=p0,name2='Q'//char(0),prop2=0.0_WP,fluidname=trim(lTab%name)//char(0))
          Pmin = p0/1.1_WP; Pmax = p0*1.1_WP
 
@@ -379,7 +379,11 @@ contains
          call lTab%addProp(propID=Tb_ID)
          call lTab%addProp(propID=rho_ID)
          call lTab%addProp(propID=MW_ID)
-         call lTab%addProp(propID=mu_ID)
+         if (lowercase(trim(name)).eq.'acetone') then
+            allocate(lTab%mu(lTab%nP,lTab%nT)); lTab%mu = 4.0e-4_WP
+         else
+            call lTab%addProp(propID=mu_ID)
+         end if
 
 
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Gas !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -646,7 +650,6 @@ contains
       !!!!!!!!!!!!!!!!!! Initialize spray evaporation solvers !!!!!!!!!!!!!!!!!!!
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       if (amGrp1) then
-         print*,'init1_0'
          ! Initialize our LPT
          initialize_lpt: block
             use fluidTable_class, only: rho_ID
@@ -685,7 +688,6 @@ contains
             ! Set collision timescale
             lp%Tcol=5.0_WP*time1%dt
          end block initialize_lpt
-         print*,'init1_1'
 
          initialize_res1: block
             allocate(resU1 (cfg1%imino_:cfg1%imaxo_,cfg1%jmino_:cfg1%jmaxo_,cfg1%kmino_:cfg1%kmaxo_)); resU1=0.0_WP
@@ -736,8 +738,8 @@ contains
             ! Setup the solver
             call T_sc%setup(implicit_ils=gmres_amg)
             call Yf_sc%setup(implicit_ils=gmres_amg)
+
             ! Set initial field values
-            print*,'init1_3'
             T_sc%SC=T_coflow
             Yf_sc%SC=Yf_coflow            
             if (restarted) then
@@ -765,15 +767,11 @@ contains
                   Yf_sc%SC(i,j,k)=Yf_coflow
                end do
             end if
-            print*,'init1_4'
-            print*,'min,maxT,Yf',minval(T_sc%SC),maxval(T_sc%SC),minval(Yf_sc%SC),maxval(Yf_sc%SC)
             call get_rho()
-            print*,'init1_5'
             ! Set diffusivities
             T_sc%diff = diff_T
             Yf_sc%diff = diff_Yf
          end block initialize_sc
-         print*,'init1_6'
          ! Initialize the flow solver
          initialize_fs1: block
             use mathtools, only: twoPi
@@ -801,7 +799,6 @@ contains
             call param_read('Implicit tolerance',fs1%implicit%rcvg)
             ! Setup the solver
             call fs1%setup(pressure_ils=pcg_amg,implicit_ils=gmres_amg)
-            print*,'init1_7'
             ! Initialize velocity field
             if (restarted) then
                call df1%pullvar(name='rhoU',var=fs1%rhoU)
@@ -838,7 +835,6 @@ contains
                   fs1%U(i,j,k)   =u_coflow
                end do
             end if
-            print*,'init1_7'
             !!!!!!!!!!!!!!!!! Allocate storage of passed velocties !!!!!!!!!!!!!!!!!
             call fs1%get_bcond('gas_inj',mybc)
             allocate(passUVW(3,mybc%itr%no_))
