@@ -4,7 +4,7 @@ Partition : 2 2 2
 # Mesh definition
 Lx :  40e-2
 Ly :  10e-2
-Lz :  1e-2
+Lz :  10e-2
 nx :  40
 ny :  10
 nz :  10
@@ -42,9 +42,9 @@ Thermal diffusivity :                   2e-5 ! from engineeringtoolbox; [m^2/s]
 Fuel diffusivity :                      11e-6 !http://webserver.dmt.upm.es/~isidoro/dat1/Mass%20diffusivity%20data.pdf
 
 # Time integration
-Max timestep size : 0.001
+Max timestep size : 0.003
 Max cfl number :    0.8
-Max time :          10
+Max time :          100
 Max temperature change : 10 ! the maximum allowable temperature change per time step [K/timeStep]
 
 # Pressure solver
@@ -59,6 +59,6 @@ Implicit iteration : 100
 Ensight output period : 0.005
 
 # Restart and save
-Restart output period : 100
+Restart output period : 10
 Statistics output period : 1
-Restart from :       !restart_4.00000E-01
+Restart from :       restart_3.00000E+01!restart_1.00020E+01!restart_4.00000E-01

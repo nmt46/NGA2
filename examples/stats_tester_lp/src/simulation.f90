@@ -297,6 +297,7 @@ contains
       ! Create stats collector
       initialize_stats : block
          use messager, only: die
+         real(WP), dimension(:), allocatable :: d_bins
          st = stats_parent(cfg=cfg,name='Particle Stats')
          if (restarted) call st%restart_from_file(stats_name)
          ! Add our stations
@@ -320,6 +321,9 @@ contains
          call st%add_definition(name='p_U*U', def='p_U*U')
          call st%add_definition(name='p_rad', def='p_rad')
          call st%add_definition(name='p_rad^2',def='p_rad*p_rad')
+         ! Add bins for particle statistics
+         d_bins = [0.0_WP,100.0_WP,200.0_WP,250.0_WP,300.0_WP,400.0_WP,600.0_WP]*1.0e-6_WP
+         call st%add_bins(d_bins=d_bins)
          ! Finalize initialization (really just allocating a couple arrays)
          call st%init_stats()
       end block initialize_stats
@@ -496,6 +500,7 @@ contains
 
          ! Cache statistics data if needed
          cache_stats : block
+            use messager, only: die
             character(len=str_medium) :: dirname,timestamp
             if (save_stat_evt%occurs()) then
                ! File pathnames
@@ -503,6 +508,7 @@ contains
                ! Prepare the directory
                if (cfg%amRoot) call execute_command_line('mkdir -p '//trim(adjustl(dirname))//trim(adjustl(timestamp)))
                call st%write(fdata=trim(adjustl(dirname))//trim(adjustl(timestamp))//'/'//'data.stats')
+               ! call die('ending now')
             end if
          end block cache_stats
          end do

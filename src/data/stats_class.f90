@@ -18,10 +18,11 @@ module stats_class
         character(len=str_medium) :: name = 'Unknown_station'               ! Name of our station. Must be unique (case-insensitive).
         logical :: amIn = .false.                                           ! Is this processor in this station?
         integer :: dim                                                      ! Dimension of station, x=1,y=2,z=3,xy=4,yz=5,zx=6,xyz=7
-        integer, dimension(3,2) :: msk                                   ! Mask for modifying mesh indices to station%vals indices
+        integer, dimension(3,2) :: msk                                      ! Mask for modifying mesh indices to station%vals indices
         integer :: imin ,imax ,jmin ,jmax ,kmin ,kmax                       ! Global min/maxes in x,y,z. Indices correspond to spray_parent%cfg
         integer :: imin_,imax_,jmin_,jmax_,kmin_,kmax_                      ! Local min/maxes in x,y,z. Indices correspond to spray_parent%cfg
         real(WP), dimension(:,:,:,:), allocatable :: vals                   ! Values for each statistic (before post-processing)
+        real(WP), dimension(:,:,:,:,:), allocatable :: binned_vals          ! Values for each diameter-binned statistic (before post-processing)
         type(MPI_Comm) :: comm = MPI_COMM_NULL                              ! Communicator for processors on this station
         logical :: amRoot
     end type station
@@ -54,13 +55,22 @@ module stats_class
         integer :: iNum = -1                                        ! Index in def which corresponds to particle number. If -1, none are
         type(lpt), pointer :: lp                                    ! Pointer to LPT solver we use for particles
 
+        !!!!!!!! Binning: All particle stats are binned if use_bins is true !!!!!!!!
+        logical :: use_bins = .false.                               ! Are we binning particle data by diameter?
+        integer :: n_bins = 0                                       ! Number of bins for particle diameters
+        integer, dimension(:), allocatable :: i_b2def               ! Map of indices from binned_vals to the definition array
+        integer :: iNum_b                                           ! Index in def_b which corresponds to particle number
+        integer :: nDef_b = 0                                       ! Number of definitions which include particle statistics
+        real(WP), dimension(:), allocatable :: d_bins               ! Diameters for the lower cutoff of each bin
+
     contains
         procedure :: restart_from_file      ! Load all the data from the restart file
         procedure :: add_station            ! Add a station for stats measuring
         procedure :: add_array              ! Add a pointer to a solver array
         procedure :: add_definition         ! Add the definition for one statistical measure. To be called after adding all arrays
+        procedure :: add_bins               ! Add bins for particle statistics based on diameter
         procedure :: set_lp                 ! Set up the lp pointer
-        procedure :: init_stats             ! Initialize statistics. To be called after adding all stations, arrays, and defitions
+        procedure :: init_stats             ! Initialize statistics. To be called after adding all stations, arrays, bins, and definitions
         procedure :: sample_stats           ! Sample stats over all stations
         procedure :: write                  ! Store data to the disk
         procedure :: post_process           ! Process data from binary file into usable forms
@@ -138,6 +148,21 @@ contains
         if (iDef.eq.-1) call die('[stats_class get_def] Unknown statistics definition was passed.')
     end function get_def
 
+    ! Given a stats definition name, return the index of that definition
+    function get_bin_def(this,name) result(iDef)
+        use messager, only: die
+        use string, only: lowercase
+        class(stats_parent),intent(in) :: this
+        character(len=*), intent(in) :: name
+        integer :: iDef
+        integer :: i
+        iDef = -1
+        do i=1,this%nDef_b
+            if (lowercase(trim(this%def(this%i_b2def(i))%name)).eq.lowercase(trim(name))) iDef = this%i_b2def(i)
+        end do
+        if (iDef.eq.-1) call die('[stats_class get_bin_def] Unknown statistics definition was passed.')
+    end function get_bin_def
+
     ! Given a station name, return the index of that station
     function get_loc(this,name) result(iLoc)
         use messager, only: die
@@ -157,7 +182,7 @@ contains
     ! Not performed here:
     !   - pointing to array pointers
     !   - pointing to lpt
-    ! It is safe to call the normal add_(station)(definition)(array),init_stats assuming the names are not changed from the initial run
+    ! It is safe to call the normal add_(station,definition,array),init_stats assuming the names are not changed from the initial run
     ! The restarted statistics must use the same sgrid as the restart file, but the partitioning may change
     subroutine restart_from_file(this,filename)
         use messager, only: die
@@ -168,7 +193,8 @@ contains
         character(len=*), intent(in) :: filename
         character(len=18) :: the_date_time
         real(WP), dimension(:,:,:,:), allocatable :: globVals
-        integer :: i,j,k,ierr,n,iLoc
+        real(WP), dimension(:,:,:,:,:), allocatable :: globVals_b
+        integer :: i,j,k,ierr,n,iLoc,i_b
         integer :: key,color,myRank
         real(WP) :: corr
         real(WP), dimension(:), allocatable :: x,y,z
@@ -200,6 +226,18 @@ contains
         ! Get summation time
         call MPI_FILE_READ_ALL(ifile,this%sum_time,1,MPI_REAL_WP,status,ierr)
 
+        ! Get bin info
+        call MPI_FILE_READ_ALL(ifile,this%n_bins,1,MPI_INTEGER,status,ierr)
+        call MPI_FILE_READ_ALL(ifile,this%nDef_b,1,MPI_INTEGER,status,ierr)
+        if (this%n_bins.gt.0) then
+            allocate(this%i_b2def(this%nDef_b))
+            allocate(this%d_bins(this%n_bins))
+            call MPI_FILE_READ_ALL(ifile,this%i_b2def,this%nDef_b,MPI_INTEGER,status,ierr)
+            call MPI_FILE_READ_ALL(ifile,this%d_bins,this%n_bins,MPI_REAL_WP,status,ierr)
+            this%use_bins = .true.
+        end if
+
+
         ! Loop over definitions
         do n=1,this%nDef
             ! Get the name
@@ -216,6 +254,9 @@ contains
             ! If this is particle number, note as such
             if (this%def(n)%nTA.eq.0.and.sum(abs(this%def(n)%expP)).eq.1.and.this%def(n)%expP(1).eq.1) this%iNum = n
         end do
+        do n=1,this%nDef_b ! only runs if nDef_b>0
+            if (this%i_b2def(n).eq.this%iNum) this%iNum_b = n
+        end do
 
         ! Loop over array pointers
         do n=1,this%nAr
@@ -226,7 +267,6 @@ contains
         do iLoc=1,this%nLoc
             ! Get the name
             call MPI_FILE_READ_ALL(ifile,this%stats(iLoc)%name,str_medium,MPI_CHARACTER,status,ierr)
-            ! print*,trim(this%stats(iLoc)%name)
             ! Get the dimension
             call MPI_FILE_READ_ALL(ifile,this%stats(iLoc)%dim,1,MPI_INTEGER,status,ierr)
             ! Get the mesh-based indices
@@ -306,6 +346,23 @@ contains
                     end do
                 end do
             end do
+            if (this%use_bins) then
+                allocate(globVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
+                                    sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
+                                    sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%n_bins,this%nDef_b))
+                do n=1,this%nDef_b
+                    do i_b=1,this%n_bins
+                        do k=sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]),sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax])
+                            do j=sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]),sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax])
+                                do i=sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]),sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax])
+                                    call MPI_FILE_READ_ALL(ifile,globVals_b(i,j,k,i_b,n),1,MPI_REAL_WP,status,ierr)
+                                end do
+                            end do
+                        end do
+                    end do
+                end do
+
+            end if
             ! Figure out if we're even in this station
             if (.not.((this%cfg%imin_.gt.this%stats(iLoc)%imax).or.(this%cfg%imax_.lt.this%stats(iLoc)%imin).or. &
                 (this%cfg%jmin_.gt.this%stats(iLoc)%jmax).or.(this%cfg%jmax_.lt.this%stats(iLoc)%jmin).or. &
@@ -360,8 +417,8 @@ contains
                              (this%cfg%z(this%stats(iLoc)%kmax +1)-this%cfg%z(this%stats(iLoc)%kmin))
 
                 ! Assign values to that array, un-normalizing them
-                if (this%iNum.ne.-1) then ! Normalize the particle number, but only if it actually exists
-                    globVals(:,:,:,this%iNum) = globVals(:,:,:,this%iNum)*this%sum_time
+                if (this%iNum.ne.-1) then ! Un-normalize the particle number, but only if it actually exists
+                    globVals(:,:,:,this%iNum) = globVals(:,:,:,this%iNum)*this%sum_time*corr
                 end if
                 
                 do i=1,this%nDef
@@ -371,12 +428,32 @@ contains
                         globVals(:,:,:,i) = globVals(:,:,:,i)*globVals(:,:,:,this%iNum)
                     end if
                 end do
-                ! print*,'hi'
                 this%stats(iLoc)%vals = globVals( & 
                     sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
                     sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
                     sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:)
-                ! print*,this%stats(iLoc)%vals
+                
+                ! Deal with bins
+                if (this%use_bins) then
+                    allocate(this%stats(iLoc)%binned_vals( &
+                        sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),this%n_bins,this%nDef_b))
+                    if (this%iNum_b.ne.-1) then ! Un-normalize the particle number, but only if it actually exists
+                        globVals_b(:,:,:,:,this%iNum_b) = globVals_b(:,:,:,:,this%iNum_b)*this%sum_time*corr
+                    end if
+                    do i_b=1,this%nDef_b ! index in binned_vals
+                        if (i_b.ne.this%iNum_b) then ! Multiply by (particle number*time) now
+                            globVals_b(:,:,:,:,i_b) = globVals_b(:,:,:,:,i_b)*globVals_b(:,:,:,:,this%iNum_b)
+                        end if
+                    end do
+                    ! Send to the local arrays
+                    this%stats(iLoc)%binned_vals = globVals_b( & 
+                        sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:,:)
+                end if
+                
                 key = this%cfg%rank
                 color = 0
             else
@@ -396,6 +473,7 @@ contains
             end if
 
             deallocate(globVals)
+            if (allocated(globVals_b)) deallocate(globVals_b)
         end do
 
         ! Can't be leaving this open
@@ -410,14 +488,14 @@ contains
         type(lpt), intent(in), target :: lp
 
         this%lp => lp
-        call this%add_definition(name='p_n',def='p_n') ! if this is already defined, nothing happens (check inside add_def)
+        call this%add_definition(name='p_n',def='p_n') ! if this is already defined, nothing happens (check happens inside add_def)
     end subroutine set_lp
 
     ! Subroutine for adding stations to the stats sampling
     subroutine add_station(this,name,dim,locator)
         use string, only : lowercase
         use messager, only : die
-        use mpi_f08,  only: MPI_ALLREDUCE,MPI_MAX,MPI_MIN,MPI_SUM,MPI_GROUP_SIZE,MPI_Group_rank,MPI_Comm_split,MPI_UNDEFINED
+        use mpi_f08
         use parallel, only: MPI_REAL_WP 
         implicit none
         class(stats_parent),intent(inout) :: this
@@ -516,6 +594,19 @@ contains
             call MPI_ALLREDUCE(real(this%stats(iLoc)%jmax_,WP),buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%stats(iLoc)%jmax=int(buf)
             call MPI_ALLREDUCE(real(this%stats(iLoc)%kmax_,WP),buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%stats(iLoc)%kmax=int(buf)
 
+            check_in_domain : block
+                integer :: int_am_in
+                integer :: my_sum
+                character(len=str_medium) :: my_message
+                int_am_in = 0
+                if (this%stats(iLoc)%amIn) int_am_in = 1.0_WP
+                call MPI_ALLREDUCE(int_am_in,my_sum,1,MPI_INTEGER,MPI_SUM,this%cfg%comm,ierr)
+                if (my_sum.eq.0) then
+                    my_message = '[stats add_station] '//name//' is not within the domain.'
+                    call die(my_message)
+                end if
+            end block check_in_domain
+            
             ! Figure out our group and communicator
             call MPI_GROUP_SIZE(this%cfg%group,nproc,ierr)
 
@@ -540,7 +631,6 @@ contains
                 call MPI_Comm_rank(this%stats(iLoc)%comm,myRank,ierr)
                 if (myRank.eq.0) this%stats(iLoc)%amRoot = .true.
             end if
-            if (this%stats(iLoc)%amRoot) print*,this%stats(iLoc)%imin,this%stats(iLoc)%imax,this%stats(iLoc)%jmin,this%stats(iLoc)%jmax,this%stats(iLoc)%kmin,this%stats(iLoc)%kmax
         end if
             
     end subroutine add_station
@@ -655,7 +745,21 @@ contains
         end if
     end subroutine add_definition
 
-    
+    ! Set the values for binning diameters... the more complex stuff is saved for init_stats
+    subroutine add_bins(this,d_bins)
+        implicit none
+        class(stats_parent),intent(inout) :: this
+        real(WP), dimension(:), intent(in) :: d_bins
+
+        ! If we're here, that means we're using bins
+        this%use_bins = .true.
+        if (.not.allocated(this%d_bins)) then
+            this%n_bins = size(d_bins)
+            allocate(this%d_bins(this%n_bins))
+            this%d_bins = d_bins
+        end if
+
+    end subroutine add_bins
 
     ! Subroutine for initializing stats arrays based on the stations which have already been initialized
     subroutine init_stats(this)
@@ -663,12 +767,38 @@ contains
         implicit none
         class(stats_parent),intent(inout) :: this
         real(WP), dimension(:,:,:,:), allocatable :: tmp
-        integer :: i,j,k,n,iLoc
-        
+        integer :: i,j,k,n,iLoc,iDef
+        integer :: n_use_bins
+        integer, dimension(:), allocatable :: tmp_i_bins
+
+        ! Set up the this%i_b2def array
+        if (this%use_bins) then
+            if (.not.allocated(this%i_b2def)) then
+                allocate(tmp_i_bins(this%nDef)) ! Over-allocate i_b2def at first
+                n_use_bins = 0
+                do iDef=1,this%nDef
+                    if (sum(abs(this%def(iDef)%expP)).gt.0) then
+                        n_use_bins = n_use_bins+1
+                        tmp_i_bins(n_use_bins) = iDef
+                    end if
+                end do
+                if(n_use_bins.eq.0) call die('[stats init_stats] Binned statistics requested but no definitions use particles.')
+                allocate(this%i_b2def(n_use_bins))
+                this%i_b2def = tmp_i_bins(1:n_use_bins)
+                this%nDef_b = n_use_bins
+                deallocate(tmp_i_bins)
+            end if
+            ! Determine iNum_b
+            this%iNum_b = -1
+            do i=1,this%nDef_b
+                if (this%iNum.eq.this%i_b2def(i)) this%iNum_b = i
+            end do
+            if (this%iNum_b.eq.-1) call die('[stats init_stats] Somehow you made it this far before it died, congrats. Associate lp to use bins.')
+        end if
         ! Loop over all stations, only entering if the processor is in the station, then allocate all the things
         do iLoc=1,this%nLoc
             if (this%stats(iLoc)%amIn) then
-                ! ! Allocate arrays based on dim
+                ! Allocate arrays based on dim
                 if (.not.allocated(this%stats(iLoc)%vals)) then ! If not allocated yet, allocate and set to
                     allocate(this%stats(iLoc)%vals( &
                         sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
@@ -680,6 +810,19 @@ contains
                     !   This would require changing how summing time is implemented.
                     call die('[stats init_stats] Additional definitions have been added since restart, this is not implemented.')
                 end if ! If already initialized from restart, don't overwrite
+                ! Binned data
+                
+                if (.not.this%use_bins) cycle ! Don't do this if we aren't binning :)
+                if (.not.allocated(this%stats(iLoc)%binned_vals)) then
+                    allocate(this%stats(iLoc)%binned_vals( &
+                        sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),&
+                        this%n_bins, this%nDef_b))
+                    this%stats(iLoc)%binned_vals = 0.0_WP
+                elseif(size(this%stats(iLoc)%binned_vals,5).ne.this%nDef_b) then
+                    call die('[stats init_stats] Additional binned definitions have been added since restart, this is not implemented.')
+                end if
             end if
         end do
         if (this%cfg%amRoot) print*,'Successfully Initialized',this%nLoc,'Stations for Statistics'
@@ -688,13 +831,13 @@ contains
 
     ! Subroutine for collecting statistics
     subroutine sample_stats(this,dt)
-        use messager, only :       die
+        use messager, only : die
         use mpi_f08, only: MPI_ALLREDUCE,MPI_SUM
         use parallel, only: MPI_REAL_WP
         implicit none
         class(stats_parent),intent(inout) :: this
         real(WP), intent(in) :: dt
-        integer :: i,j,k,iDef,iLoc,iS,jS,kS,iA,ierr
+        integer :: i,j,k,iDef,iLoc,iS,jS,kS,iA,ierr,iDef_b
         real(WP) :: isP
         real(WP) :: corr ! Corrects for sampling volume when stat cell is larger than mesh cell
         integer, dimension(3,2) :: msk ! Modify indices for different station dimensions
@@ -710,7 +853,7 @@ contains
                 allocate(buf(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
                              sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
                              sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_])))
-
+                iDef_b = 0
                 do iDef=1,this%nDef
                     buf = 1.0_WP
                     if (this%def(iDef)%nTA.gt.0) then
@@ -733,7 +876,6 @@ contains
                                     buf2(i,j,k) = corr
                                     ! Multiply the buffer by the values in the original arrays
                                     do iA=1,this%def(iDef)%nTA
-                                        ! print*,'iA',iA,'ijk',i,j,k
                                         buf2(i,j,k) = buf2(i,j,k) * this%arp(this%def(iDef)%iAs(iA))%val(i,j,k)
                                     end do
                                 end do
@@ -765,14 +907,19 @@ contains
 
                     ! Loop over all the particles, if we are doing particles
                     if (sum(abs(this%def(iDef)%expP)).ne.0) then
+                        iDef_b = iDef_b+1 ! Increment the binned definition counter
+
                         ! Unlike the purely eulerian stats, we need to complete the averaging _now_ for the lagrangian-eulerian statistics
-                        allocate(buf2(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
-                                      sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
-                                      sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_])))
-                        i = size(buf,1)*size(buf,2)*size(buf,3)
-                        ! Combine across partitions; weighted averaging with corr is done now.
-                        call MPI_ALLREDUCE(buf,buf2,i,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%comm,ierr); buf=buf2
-                        deallocate(buf2)
+                        if (this%def(iDef)%nTA.gt.0) then
+                            allocate(buf2(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_])))
+                            i = size(buf,1)*size(buf,2)*size(buf,3)
+                            ! Combine across partitions if includes eulerian info; otherwise buf remains = 1.0_WP
+                            ! Weighted averaging with corr is done now.
+                            call MPI_ALLREDUCE(buf,buf2,i,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%comm,ierr); buf=buf2
+                            deallocate(buf2)
+                        end if
                         do i=1,this%lp%np_
                             ! If particle is inside our station
                             if ((this%lp%p(i)%ind(1).ge.this%stats(iLoc)%imin_.and.this%lp%p(i)%ind(1).le.this%stats(iLoc)%imax_).and. &
@@ -789,6 +936,17 @@ contains
                                     product([1.0_WP,this%lp%p(i)%d,this%lp%p(i)%T_d,this%lp%p(i)%vel(1),this%lp%p(i)%vel(2),this%lp%p(i)%vel(3),&
                                     sum([this%lp%p(i)%vel(2),this%lp%p(i)%vel(3)]*[this%lp%p(i)%pos(2),this%lp%p(i)%pos(3)]/ &
                                     (epsilon(1.0_WP)+sqrt(this%lp%p(i)%pos(2)**2+this%lp%p(i)%pos(3)**2)))]**this%def(iDef)%expP)
+                                
+                                if (.not.this%use_bins) cycle
+                                ! If binning, add to the bins now
+                                this%stats(iLoc)%binned_vals(iS,jS,kS,:,iDef_b) = &
+                                    this%stats(iLoc)%binned_vals(iS,jS,kS,:,iDef_b)+dt*buf(iS,jS,kS)* &
+                                    product([1.0_WP,this%lp%p(i)%d,this%lp%p(i)%T_d,this%lp%p(i)%vel(1),this%lp%p(i)%vel(2),this%lp%p(i)%vel(3),&
+                                    sum([this%lp%p(i)%vel(2),this%lp%p(i)%vel(3)]*[this%lp%p(i)%pos(2),this%lp%p(i)%pos(3)]/ &
+                                    (epsilon(1.0_WP)+sqrt(this%lp%p(i)%pos(2)**2+this%lp%p(i)%pos(3)**2)))]**this%def(iDef)%expP)*&
+                                    ! Now multiply by a vector which is zero everywhere except for the bin corresponding to p%d, where it is one
+                                    -0.25_WP*(sign(1.0_WP,this%lp%p(i)%d- this%d_bins(1:this%n_bins)              )+1.0_WP)* &
+                                             (sign(1.0_WP,this%lp%p(i)%d-[this%d_bins(2:this%n_bins),huge(1.0_WP)])-1.0_WP)
                             end if
                         end do
                     else
@@ -799,7 +957,7 @@ contains
             end if
         end do
         call MPI_Barrier(this%cfg%comm)
-        if (this%cfg%amRoot) print*,'Statistics collected :)'
+        ! if (this%cfg%amRoot) print*,'Statistics collected :)'
     end subroutine sample_stats
 
     ! Normalize collected statistics over time
@@ -807,8 +965,9 @@ contains
         use mpi_f08,  only: MPI_ALLREDUCE,MPI_SUM
         use parallel, only: MPI_REAL_WP
         class(stats_parent), intent(inout) :: this
-        integer :: n,i,iLoc,ierr,numVals
+        integer :: n,i,i_b,iLoc,ierr,numVals
         real(WP), dimension(:,:,:,:), allocatable :: buf,globVals
+        real(WP), dimension(:,:,:,:,:), allocatable :: buf_b,globVals_b ! Binned versions
 
         do iLoc=1,this%nLoc
             if (this%stats(iLoc)%amIn) then
@@ -828,7 +987,6 @@ contains
                 call MPI_ALLREDUCE(globVals,buf,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%comm,ierr); globVals = buf
                 deallocate(buf)
 
-
                 do i = 1,this%nDef
                     ! If no particles, this is simple
                     if (sum(abs(this%def(i)%expP)).eq.0) then
@@ -845,24 +1003,63 @@ contains
                 if (this%iNum.ne.-1) then ! Normalize the particle number, but only if it actually exists
                     globVals(:,:,:,this%iNum) = globVals(:,:,:,this%iNum)/this%sum_time
                 end if
-                
+                ! Send global values back to the vals array
                 this%stats(iLoc)%vals = globVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
                                                  sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
                                                  sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:)
                 deallocate(globVals)
+                if (.not.this%use_bins) cycle
+                ! Deal with bins now
+                allocate(buf_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
+                                sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
+                                sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%n_bins,this%nDef))
+                allocate(globVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
+                                    sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
+                                    sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%n_bins,this%nDef_b))
+                globVals_b = 0.0_WP
+                globVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                            sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                            sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:,:) = this%stats(iLoc)%binned_vals
+                ! Sum over all partitions within the station
+                numVals = size(globVals_b,1)*size(globVals_b,2)*size(globVals_b,3)*size(globVals_b,4)*size(globVals_b,5)
+                call MPI_ALLREDUCE(globVals_b,buf_b,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%comm,ierr); globVals_b = buf_b
+                deallocate(buf_b)
+
+                do i = 1,this%nDef_b
+                    i_b = this%i_b2def(i)
+                    if (i_b.ne.this%iNum_b) then ! Don't divide out particle number yet... that'd mess everything else up
+                        ! If there are particles, need to be careful to not divide by zero
+                        where (globVals_b(:,:,:,:,this%iNum_b).gt.0.0_WP) ! Only normalize where we found particles
+                            globVals_b(:,:,:,:,i) = globVals_b(:,:,:,:,i)/globVals_b(:,:,:,:,this%iNum_b)
+                        elsewhere
+                            globVals_b(:,:,:,:,i) = 0.0_WP
+                        end where
+                    end if
+                end do
+                if (this%iNum_b.ne.-1) then ! Normalize the particle number, but only if it actually exists
+                    globVals_b(:,:,:,:,this%iNum_b) = globVals_b(:,:,:,:,this%iNum_b)/this%sum_time
+                end if
+                ! Send global values back to the vals array
+                this%stats(iLoc)%binned_vals = &
+                    globVals_b( sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                                sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                                sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:,:)
+                deallocate(globVals_b)
             end if
         end do
     end subroutine post_process
 
     ! Get global values for a single locator/station
-    subroutine get_global(this,iLoc,globVals)
+    subroutine get_global(this,iLoc,globVals,globVals_b)
         use mpi_f08,  only: MPI_ALLREDUCE,MPI_SUM
         use parallel, only: MPI_REAL_WP
         class(stats_parent), intent(inout) :: this
-        integer :: n,i,ierr,numVals
+        integer :: n,i,ierr,numVals,i_b
         integer, intent(in) :: iLoc
         real(WP), dimension(:,:,:,:), allocatable :: buf
         real(WP), dimension(:,:,:,:), allocatable, intent(out) :: globVals
+        real(WP), dimension(:,:,:,:,:), allocatable :: buf_b ! Buffer for binned global values
+        real(WP), dimension(:,:,:,:,:), allocatable, optional, intent(out) :: globVals_b ! Binned global values
 
         if (this%stats(iLoc)%amIn) then
             ! Allocate array to hold the global (for station) statistics
@@ -896,6 +1093,37 @@ contains
             if (this%iNum.ne.-1) then ! Normalize the particle number, but only if it actually exists
                 globVals(:,:,:,this%iNum) = globVals(:,:,:,this%iNum)/this%sum_time
             end if
+            ! Deal with bins now
+            if (.not.this%use_bins) return
+            allocate(buf_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
+                            sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
+                            sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%n_bins,this%nDef_b))
+            allocate(globVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
+                                sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
+                                sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%n_bins,this%nDef_b))
+            globVals_b = 0.0_WP
+            globVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:,:) = this%stats(iLoc)%binned_vals
+            ! Sum over all partitions within the station
+            numVals = size(globVals_b,1)*size(globVals_b,2)*size(globVals_b,3)*size(globVals_b,4)*size(globVals_b,5)
+            call MPI_ALLREDUCE(globVals_b,buf_b,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%comm,ierr); globVals_b = buf_b
+            deallocate(buf_b)
+
+            do i = 1,this%nDef_b
+                i_b = this%i_b2def(i)
+                if (i_b.ne.this%iNum_b) then ! Don't divide out particle number yet... that'd mess everything else up
+                    ! If there are particles, need to be careful to not divide by zero
+                    where (globVals_b(:,:,:,:,this%iNum_b).gt.0.0_WP) ! Only normalize where we found particles
+                        globVals_b(:,:,:,:,i) = globVals_b(:,:,:,:,i)/globVals_b(:,:,:,:,this%iNum_b)
+                    elsewhere
+                        globVals_b(:,:,:,:,i) = 0.0_WP
+                    end where
+                end if
+            end do
+            if (this%iNum_b.ne.-1) then ! Normalize the particle number, but only if it actually exists
+                globVals_b(:,:,:,:,this%iNum_b) = globVals_b(:,:,:,:,this%iNum_b)/this%sum_time
+            end if
         end if
     end subroutine get_global
     ! Store current state of statistics to the disk for retrieval later. Doesn't affect current arrays
@@ -905,8 +1133,9 @@ contains
         class(stats_parent), intent(inout) :: this
         character(len=*), intent(in), optional :: fdata
         character(len=str_medium) :: filename
-        integer :: i,j,k,iLoc,n,ierr,iunit
+        integer :: i,j,k,iLoc,n,ierr,iunit,i_b
         real(WP), dimension(:,:,:,:), allocatable :: globVals
+        real(WP), dimension(:,:,:,:,:), allocatable :: globVals_b
         character(len=8) :: dateChar
         character(len=10) :: timeChar
 
@@ -916,7 +1145,7 @@ contains
         else
             filename=trim(adjustl(this%name))
         end if
-
+        
         ! Write all non-grid things on root
         if (this%cfg%amRoot) then
             ! Open file
@@ -938,6 +1167,20 @@ contains
             write(iunit) this%nDef
             ! Write sum_time
             write(iunit) this%sum_time
+
+            !!!!!!!!!!!!! Deal with bins !!!!!!!!!!!!
+            ! Write number of bins; zero if not using bins
+            write(iunit) this%n_bins
+            ! Write number of definitions using bins; zero if not using bins
+            write(iunit) this%nDef_b
+            ! Write the indices of bins which correspond to definitions; nothing is written if there are no bins
+            do n=1,this%nDef_b
+                write(iunit) this%i_b2def(n)
+            end do
+            ! Write the lower cutoff values used for the bins
+            do n=1,this%n_bins
+                write(iunit) this%d_bins(n)
+            end do
 
             !!!!!!!!! Write definition info !!!!!!!!!
             do n=1,this%nDef
@@ -963,7 +1206,7 @@ contains
 
             close(iunit)
         end if
-        
+
         ! Loop over stations
         do iLoc=1,this%nLoc
             ! Stop the non-root processors from stepping on the processor currently writing data
@@ -971,9 +1214,12 @@ contains
 
             ! Only do stuff if we're in this station
             if (this%stats(iLoc)%amIn) then
-                ! Gather together global data
-                call this%get_global(iLoc=iLoc,globVals=globVals)
-
+                ! Gather together global data---every process does this
+                if (this%use_bins) then
+                    call this%get_global(iLoc=iLoc,globVals=globVals,globVals_b=globVals_b)
+                else
+                    call this%get_global(iLoc=iLoc,globVals=globVals)
+                end if
                 ! If we are the station root, write station info
                 if (this%stats(iLoc)%amRoot) then
                     open(newunit=iunit,file=trim(filename),form='unformatted',status='old',access='stream',iostat=ierr,position='append')
@@ -1014,6 +1260,18 @@ contains
                             end do
                         end do
                     end do
+                    ! Write binned global data (if needed)
+                    do n=1,this%nDef_b ! this loop never runs if there are no bins
+                        do i_b=1,this%n_bins
+                            do k=1,size(globVals,3)
+                                do j=1,size(globVals,2)
+                                    do i=1,size(globVals,1)
+                                        write(iunit) globVals_b(i,j,k,i_b,n)
+                                    end do
+                                end do
+                            end do
+                        end do
+                    end do
                     close(iunit)
                 end if
                 
@@ -1031,6 +1289,7 @@ contains
         do iLoc=1,this%nLoc
             if (this%stats(iLoc)%amIn) then
                 this%stats(iLoc)%vals=0.0_WP
+                if (this%use_bins) this%stats(iLoc)%binned_vals=0.0_WP
             end if
         end do
 

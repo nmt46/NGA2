@@ -138,6 +138,46 @@ contains
       if (i.eq.pg%imax+1) isIn = .true.
    end function xp_locator1
 
+   function ym_locator1(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (j.eq.pg%jmin.and.pg%x(i).gt.0.1_WP*(pg%x(pg%imax)-pg%x(pg%imin))) isIn = .true.
+   end function ym_locator1
+
+   function yp_locator1(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (j.eq.pg%jmax+1.and.pg%x(i).gt.0.1_WP*(pg%x(pg%imax)-pg%x(pg%imin))) isIn = .true.
+   end function yp_locator1
+
+   function zm_locator1(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (k.eq.pg%kmin.and.pg%x(i).gt.0.1_WP*(pg%x(pg%imax)-pg%x(pg%imin))) isIn = .true.
+   end function zm_locator1
+
+   function zp_locator1(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .false.
+      if (k.eq.pg%kmax+1.and.pg%x(i).gt.0.1_WP*(pg%x(pg%imax)-pg%x(pg%imin))) isIn = .true.
+   end function zp_locator1
+
    function xp_sc_locator(pg,i,j,k) result(isIn)
       use pgrid_class, only: pgrid
       implicit none
@@ -775,7 +815,7 @@ contains
          ! Initialize the flow solver
          initialize_fs1: block
             use mathtools, only: twoPi
-            use lowmach_class, only: clipped_neumann,dirichlet,bcond
+            use lowmach_class, only: clipped_neumann,dirichlet,bcond,neumann
             use ils_class, only: pcg_amg,pfmg,gmres_amg
             use fluidTable_class, only: mu_ID
             type(bcond),pointer :: mybc
@@ -785,6 +825,11 @@ contains
             ! Setup bconds
             ! call fs1%add_bcond(name='bc_xm',type=neumann,face='x',dir=-1,canCorrect=.true.,locator=xm_locator)
             call fs1%add_bcond(name='bc_xp',    type=clipped_neumann,face='x',dir=+1,canCorrect=.true., locator=xp_locator1)
+            ! call fs1%add_bcond(name='bc_ym',    type=clipped_neumann,face='y',dir=-1,canCorrect=.true., locator=ym_locator1)
+            ! call fs1%add_bcond(name='bc_yp',    type=clipped_neumann,face='y',dir=+1,canCorrect=.true., locator=yp_locator1)
+            ! if (cfg1%nz.gt.1) call fs1%add_bcond(name='bc_zm',    type=clipped_neumann,face='z',dir=-1,canCorrect=.true., locator=zm_locator1)
+            ! if (cfg1%nz.gt.1) call fs1%add_bcond(name='bc_zp',    type=clipped_neumann,face='z',dir=+1,canCorrect=.true., locator=zp_locator1)
+
             call fs1%add_bcond(name='gas_inj',  type=dirichlet,      face='x',dir=-1,canCorrect=.false.,locator=gas_inj_locator1)
             call fs1%add_bcond(name='gas_coflow',type=dirichlet,      face='x',dir=-1,canCorrect=.false.,locator=coflow_locator)
 
@@ -857,6 +902,7 @@ contains
          ! Create our stats gathering
          create_stats: block
             use messager, only: die
+            real(WP), dimension(:), allocatable :: d_bins
             st = stats_parent(cfg=cfg1,name='Particle Stats')
             if (restarted) call st%restart_from_file(stats_name)
             ! Add our stations
@@ -889,6 +935,9 @@ contains
             call st%add_definition(name='p_U^2', def='p_U*p_U')
             call st%add_definition(name='p_rad', def='p_rad') ! Radial velocity of particle
             call st%add_definition(name='p_rad^2',def='p_rad*p_rad')
+            ! Add bins for particle statistics
+            d_bins = [0.0_WP,5.0_WP,10.0_WP,20.0_WP,30.0_WP,40.0_WP]*1.0e-6_WP
+            call st%add_bins(d_bins=d_bins)
             ! Finalize initialization (really just allocating a couple arrays)
             call st%init_stats()
 
@@ -1070,27 +1119,27 @@ contains
                ! Apply time-varying Dirichlet conditions
                ! This is where time-dpt Dirichlet would be enforced
                
-               update_visc2: block
-                  use fluidTable_class, only: mu_ID
-                  real(WP) :: mu_normal
-                  integer :: i,j,k
-                  ! Get the turbulent viscosity
-                  call fs2%interp_vel(Ui2,Vi2,Wi2)
-                  call fs2%get_strainrate(Ui=Ui2,Vi=Vi2,Wi=Wi2,SR=SR2)
-                  resU2=fs2%rho ! Abuse resU2 :O
-                  call sgs2%get_visc(dt=time2%dtold,rho=resU2,Ui=Ui2,Vi=Vi2,Wi=Wi2,SR=SR2)
-                  ! Get the normal dynamic viscosity
-                  call gTab%evalProps(propOut=mu_normal,T_q=T_jet,P_q=p0,propID=mu_ID)
-                  ! Loop some things
-                  do k=fs2%cfg%kmin_,fs2%cfg%kmax_
-                     do j=fs2%cfg%jmin_,fs2%cfg%jmax_
-                        do i=fs2%cfg%imin_,fs2%cfg%imax_
-                           ! Apply the turbulent viscosity
-                           fs2%visc(i,j,k) = mu_normal + sgs2%visc(i,j,k)
-                        end do
-                     end do
-                  end do
-               end block update_visc2
+               ! update_visc2: block
+               !    use fluidTable_class, only: mu_ID
+               !    real(WP) :: mu_normal
+               !    integer :: i,j,k
+               !    ! Get the turbulent viscosity
+               !    call fs2%interp_vel(Ui2,Vi2,Wi2)
+               !    call fs2%get_strainrate(Ui=Ui2,Vi=Vi2,Wi=Wi2,SR=SR2)
+               !    resU2=fs2%rho ! Abuse resU2 :O
+               !    call sgs2%get_visc(dt=time2%dtold,rho=resU2,Ui=Ui2,Vi=Vi2,Wi=Wi2,SR=SR2)
+               !    ! Get the normal dynamic viscosity
+               !    call gTab%evalProps(propOut=mu_normal,T_q=T_jet,P_q=p0,propID=mu_ID)
+               !    ! Loop some things
+               !    do k=fs2%cfg%kmin_,fs2%cfg%kmax_
+               !       do j=fs2%cfg%jmin_,fs2%cfg%jmax_
+               !          do i=fs2%cfg%imin_,fs2%cfg%imax_
+               !             ! Apply the turbulent viscosity
+               !             ! fs2%visc(i,j,k) = mu_normal + sgs2%visc(i,j,k)
+               !          end do
+               !       end do
+               !    end do
+               ! end block update_visc2
                ! print*,'here0'
                ! Perform sub-iterations
                do while (time2%it.le.time2%itmax)
@@ -1359,8 +1408,8 @@ contains
                      Yf_sc%SC(i,j,k)=Yf_coflow
                      T_sc%rho(i,j,k)=p0/(R_cst*(Yf_sc%SC(i,j,k)/W_l+(1.0_WP-Yf_sc%SC(i,j,k))/W_g)*T_sc%SC(i,j,k))
                      Yf_sc%rho(i,j,k)=T_sc%rho(i,j,k)
-                     T_sc%rhoSC(i,j,k) =T_jet*T_sc%rho(i,j,k)
-                     Yf_sc%rhoSC(i,j,k)=Yf_jet*Yf_sc%rho(i,j,k)
+                     T_sc%rhoSC(i,j,k) =T_coflow*T_sc%rho(i,j,k)
+                     Yf_sc%rhoSC(i,j,k)=Yf_coflow*Yf_sc%rho(i,j,k)
                   end do  
 
                end block scalar_dirichlet
@@ -1385,32 +1434,32 @@ contains
                ! T_sc%SC=resT/T_sc%rho
                ! Yf_sc%SC=resYf/Yf_sc%rho
                ! UPDATE THE VISCOSITY & APPLY SUBGRID MODELING
-               update_visc_sgs: block
-                  use fluidTable_class, only: mu_ID
-                  integer :: i,j,k
-                  real(WP) :: Sc_t ! Turbulent schmidt number
-                  ! Get the turbulent viscosity
-                  call fs1%interp_vel(Ui1,Vi1,Wi1)
-                  call fs1%get_strainrate(Ui=Ui1,Vi=Vi1,Wi=Wi1,SR=SR1)
-                  call sgs1%get_visc(dt=time1%dtold,rho=T_sc%rho,Ui=Ui1,Vi=Vi1,Wi=Wi1,SR=SR1)
+               ! update_visc_sgs: block
+               !    use fluidTable_class, only: mu_ID
+               !    integer :: i,j,k
+               !    real(WP) :: Sc_t ! Turbulent schmidt number
+               !    ! Get the turbulent viscosity
+               !    call fs1%interp_vel(Ui1,Vi1,Wi1)
+               !    call fs1%get_strainrate(Ui=Ui1,Vi=Vi1,Wi=Wi1,SR=SR1)
+               !    call sgs1%get_visc(dt=time1%dtold,rho=T_sc%rho,Ui=Ui1,Vi=Vi1,Wi=Wi1,SR=SR1)
 
-                  Sc_t = 1.2 ! from Li, et al. "Numerical and experimental investigation of turbulent n-heptane jet-in-hot-coflow flames." Fuel 283 (2021)
+               !    Sc_t = 1.2 ! from Li, et al. "Numerical and experimental investigation of turbulent n-heptane jet-in-hot-coflow flames." Fuel 283 (2021)
 
-                  ! Loop some things
-                  do k=fs1%cfg%kmin_,fs1%cfg%kmax_
-                     do j=fs1%cfg%jmin_,fs1%cfg%jmax_
-                        do i=fs1%cfg%imin_,fs1%cfg%imax_
-                           ! Get the normal dynamic viscosity
-                           call gTab%evalProps(propOut=fs1%visc(i,j,k),T_q=T_sc%SC(i,j,k),P_q=p0,propID=mu_ID)
-                           ! Apply the turbulent viscosity
-                           fs1%visc(i,j,k) = fs1%visc(i,j,k) + sgs1%visc(i,j,k)
-               ! UPDATE THE DIFFUSIVITY
-                           T_sc%diff(i,j,k) = diff_T +sgs1%visc(i,j,k)/ T_sc%rho(i,j,k)
-                           Yf_sc%diff(i,j,k)= diff_Yf+sgs1%visc(i,j,k)/(Yf_sc%rho(i,j,k)*Sc_t)
-                        end do
-                     end do
-                  end do
-               end block update_visc_sgs
+               !    ! Loop some things
+               !    do k=fs1%cfg%kmin_,fs1%cfg%kmax_
+               !       do j=fs1%cfg%jmin_,fs1%cfg%jmax_
+               !          do i=fs1%cfg%imin_,fs1%cfg%imax_
+               !             ! Get the normal dynamic viscosity
+               !             call gTab%evalProps(propOut=fs1%visc(i,j,k),T_q=T_sc%SC(i,j,k),P_q=p0,propID=mu_ID)
+               !             ! Apply the turbulent viscosity
+               !             ! fs1%visc(i,j,k) = fs1%visc(i,j,k) + sgs1%visc(i,j,k)
+               ! ! UPDATE THE DIFFUSIVITY
+               !             T_sc%diff(i,j,k) = diff_T +sgs1%visc(i,j,k)/ T_sc%rho(i,j,k)
+               !             Yf_sc%diff(i,j,k)= diff_Yf+sgs1%visc(i,j,k)/(Yf_sc%rho(i,j,k)*Sc_t)
+               !          end do
+               !       end do
+               !    end do
+               ! end block update_visc_sgs
                ! print*,'max turbulent visc:',maxval(sgs1%visc)
 
                ! ===================================================
@@ -1432,7 +1481,7 @@ contains
                resU1=time1%dtmid*resU1-(2.0_WP*fs1%rhoU-2.0_WP*fs1%rhoUold)
                resV1=time1%dtmid*resV1-(2.0_WP*fs1%rhoV-2.0_WP*fs1%rhoVold)
                resW1=time1%dtmid*resW1-(2.0_WP*fs1%rhoW-2.0_WP*fs1%rhoWold)
-
+               if (cfg1%amRoot) print*,'run_1_0'
                add_lpt_src: block
                   integer :: i,j,k
                   do k=fs1%cfg%kmin_,fs1%cfg%kmax_
@@ -1445,19 +1494,22 @@ contains
                      end do
                   end do
                end block add_lpt_src
+               if (cfg1%amRoot) print*,'run_1_1'
                ! Form implicit residuals
                call fs1%solve_implicit(time1%dtmid,resU1,resV1,resW1)
+
                ! print*,'here0H',time1%it,max(maxval(fs1%U),maxval(fs1%V),maxval(fs1%W)),'rhoU',maxval(fs1%rhoU),'resU1',maxval(resU1)
                ! print*,'rhoU',maxval(fs1%rhoU),'resU1',maxval(resU1)
                ! Apply these residuals
                fs1%U=2.0_WP*fs1%U-fs1%Uold+resU1
                fs1%V=2.0_WP*fs1%V-fs1%Vold+resV1
                fs1%W=2.0_WP*fs1%W-fs1%Wold+resW1
-               
+               if (cfg1%amRoot) print*,'run_1_2'
                ! Apply other boundary conditions and update momentum
                call fs1%apply_bcond(time1%tmid,time1%dtmid)
                call fs1%rho_multiply()
                call fs1%apply_bcond(time1%tmid,time1%dtmid)
+               if (cfg1%amRoot) print*,'run_1_3'
                ! print*,'here0I',time1%it,max(maxval(fs1%U),maxval(fs1%V),maxval(fs1%W)),'rhoU',maxval(fs1%rhoU),'resU1',maxval(resU1)
                ! This is where dirichlet BCs would go
                apply_dirichlet : block
@@ -1484,13 +1536,14 @@ contains
                   end do  
 
                end block apply_dirichlet
-
+               if (cfg1%amRoot) print*,'run_1_4'
                ! Solve Poisson equation
                call Yf_sc%get_drhodt(dt=time1%dt,drhodt=resYf)
                call fs1%correct_mfr(drhodt=(resYf + fs1%cfg%vol*lp%srcM/time1%dtmid*drop_scale))
                call fs1%get_div(drhodt=(resYf + fs1%cfg%vol*lp%srcM/time1%dtmid*drop_scale))
                fs1%psolv%rhs=-fs1%cfg%vol*fs1%div/time1%dtmid
                fs1%psolv%sol=0.0_WP
+               if (cfg1%amRoot) print*,'run_1_5'
                call fs1%psolv%solve()
                call fs1%shift_p(fs1%psolv%sol)
                ! print*,'here0J',time1%it,max(maxval(fs1%U),maxval(fs1%V),maxval(fs1%W)),'rhoU',maxval(fs1%rhoU),'resU1',maxval(resU1)
@@ -1658,8 +1711,6 @@ contains
                   ! Prepare the directory
                   if (cfg1%amRoot) call execute_command_line('mkdir -p '//trim(adjustl(dirname))//trim(adjustl(timestamp)))
                   call st%write(fdata=trim(adjustl(dirname))//trim(adjustl(timestamp))//'/'//'data.stats')
-                  call MPI_Barrier(cfg1%comm)
-                  call die('Forensic stop')
                end block cache_stats
             end if
 
