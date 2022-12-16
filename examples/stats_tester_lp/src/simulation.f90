@@ -88,6 +88,15 @@ contains
       if (pg%xm(i).gt.xLoc.and.pg%xm(i).lt.xLoc+1.0_WP*pg%dx(1)) isIn = .true.
    end function station_3_locator
 
+   function station_4_locator(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn = .true.
+   end function station_4_locator
+
    function print_wall_time() result(wt)
       use parallel, only: wtinit,parallel_time
       real(WP) :: wt
@@ -301,9 +310,11 @@ contains
          st = stats_parent(cfg=cfg,name='Particle Stats')
          if (restarted) call st%restart_from_file(stats_name)
          ! Add our stations
-         call st%add_station(name='x=0',dim='yz',locator=station_1_locator)
-         call st%add_station(name='x=0.2',dim='yz',locator=station_2_locator)
+         call st%add_station(name='x=0',dim='xyz',locator=station_1_locator)
+         call st%add_station(name='x=0.2',dim='z',locator=station_2_locator)
          call st%add_station(name='x=0.39',dim='yz',locator=station_3_locator)
+         call st%add_station(name='everywhere',dim='x',locator=station_4_locator)
+         call st%add_station(name='test2',dim='0D',locator=station_4_locator)
          ! Add pointers to eulerian arrays
          call st%add_array(name='U',array=resU)
          call st%add_array(name='V',array=resV)
@@ -323,7 +334,7 @@ contains
          call st%add_definition(name='p_rad^2',def='p_rad*p_rad')
          ! Add bins for particle statistics
          d_bins = [0.0_WP,100.0_WP,200.0_WP,250.0_WP,300.0_WP,400.0_WP,600.0_WP]*1.0e-6_WP
-         call st%add_bins(d_bins=d_bins)
+         ! call st%add_bins(d_bins=d_bins)
          ! Finalize initialization (really just allocating a couple arrays)
          call st%init_stats()
       end block initialize_stats

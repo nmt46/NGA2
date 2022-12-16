@@ -23,8 +23,12 @@ module stats_class
         integer :: imin_,imax_,jmin_,jmax_,kmin_,kmax_                      ! Local min/maxes in x,y,z. Indices correspond to spray_parent%cfg
         real(WP), dimension(:,:,:,:), allocatable :: vals                   ! Values for each statistic (before post-processing)
         real(WP), dimension(:,:,:,:,:), allocatable :: binned_vals          ! Values for each diameter-binned statistic (before post-processing)
-        type(MPI_Comm) :: comm = MPI_COMM_NULL                              ! Communicator for processors on this station
-        logical :: amRoot
+        type(MPI_Comm) :: all_comm = MPI_COMM_NULL                          ! Communicator for processors on this station
+        type(MPI_Comm) :: sum_comm = MPI_COMM_NULL                          ! Communicator for summing between processors on this station
+        type(MPI_Comm) :: write_comm = MPI_COMM_NULL                        ! Communicator for processors on this station which write stats data
+        type(MPI_Datatype) :: view  = MPI_DATATYPE_NULL                     ! Local to station-global array mapping info - real(WP)
+        logical :: amRoot                                                   ! Is this process the root of all_comm?
+        logical :: should_write = .false.                                   ! Is this process to be involved in writing data
     end type station
 
     ! Array of pointers to the data fed into the statistics and associated names
@@ -76,7 +80,7 @@ module stats_class
         procedure :: post_process           ! Process data from binary file into usable forms
         procedure :: reset_stats            ! Reset statistics, maintaining stations
         procedure :: get_def                ! Get the index of a stat definition
-        procedure :: get_global             ! Return the global statistics for a given station (normalizes results by time)
+        procedure :: get_reduced            ! Return the reduced statistics for a given station (normalizes results by time and where applicable, particle number)
         
 
     end type stats_parent
@@ -192,8 +196,6 @@ contains
         class(stats_parent) :: this
         character(len=*), intent(in) :: filename
         character(len=18) :: the_date_time
-        real(WP), dimension(:,:,:,:), allocatable :: globVals
-        real(WP), dimension(:,:,:,:,:), allocatable :: globVals_b
         integer :: i,j,k,ierr,n,iLoc,i_b
         integer :: key,color,myRank
         real(WP) :: corr
@@ -202,6 +204,9 @@ contains
         integer, dimension(3) :: dims
         type(MPI_File) :: ifile
         type(MPI_Status) :: status
+        integer(kind=MPI_OFFSET_KIND) :: pos
+        integer, dimension(3) :: gsizes,lsizes,lstart
+        integer :: nx_,ny_,nz_,my_sum_rank
 
         ! Open the file
         call MPI_FILE_OPEN(this%cfg%comm,trim(filename),MPI_MODE_RDONLY,info_mpiio,ifile,ierr)
@@ -255,6 +260,7 @@ contains
             if (this%def(n)%nTA.eq.0.and.sum(abs(this%def(n)%expP)).eq.1.and.this%def(n)%expP(1).eq.1) this%iNum = n
         end do
         do n=1,this%nDef_b ! only runs if nDef_b>0
+            ! Write the map from binned definition index to global definition index
             if (this%i_b2def(n).eq.this%iNum) this%iNum_b = n
         end do
 
@@ -263,8 +269,16 @@ contains
             call MPI_FILE_READ_ALL(ifile,this%arp(n)%name,str_medium,MPI_CHARACTER,status,ierr)
         end do
 
+        ! To facilitate looping, close the file now, saving our position
+        call MPI_FILE_GET_POSITION(ifile,pos,ierr)
+        call MPI_FILE_CLOSE(ifile,ierr)
+
         ! Loop over stations
         do iLoc=1,this%nLoc
+            ! Reopen the file on all processes and reset our position
+            call MPI_FILE_OPEN(this%cfg%comm,trim(filename),MPI_MODE_RDONLY,info_mpiio,ifile,ierr)
+            call MPI_FILE_SEEK(ifile,pos,MPI_SEEK_SET,ierr)
+
             ! Get the name
             call MPI_FILE_READ_ALL(ifile,this%stats(iLoc)%name,str_medium,MPI_CHARACTER,status,ierr)
             ! Get the dimension
@@ -291,27 +305,24 @@ contains
             do k=this%stats(iLoc)%kmin,this%stats(iLoc)%kmax
                 call MPI_FILE_READ_ALL(ifile,z(k),1,MPI_REAL_WP,status,ierr)
             end do
-
             buf = sum(abs(this%cfg%x(this%stats(iLoc)%imin:this%stats(iLoc)%imax)-x))+&
                   sum(abs(this%cfg%y(this%stats(iLoc)%jmin:this%stats(iLoc)%jmax)-y))+&
                   sum(abs(this%cfg%z(this%stats(iLoc)%kmin:this%stats(iLoc)%kmax)-z))
             if ((this%stats(iLoc)%imin.lt.this%cfg%imin).or.(this%stats(iLoc)%imax.gt.this%cfg%imax).or. &
                 (this%stats(iLoc)%jmin.lt.this%cfg%jmin).or.(this%stats(iLoc)%jmax.gt.this%cfg%jmax).or. &
                 (this%stats(iLoc)%kmin.lt.this%cfg%kmin).or.(this%stats(iLoc)%kmax.gt.this%cfg%kmax).or. &
-                buf.gt.epsilon(abs(max(maxval(x)-minval(x),maxval(y)-minval(y),maxval(z)-minval(z)))))  then
+                buf.gt.1.0e-6_WP*(abs(max(maxval(x)-minval(x),maxval(y)-minval(y),maxval(z)-minval(z)))))  then
                 if (this%cfg%amRoot) print*,'Residual of pgrid coordinates minus coordinates from file:',buf
                 if (this%cfg%amRoot) call die('[stats constructor] Coordinates from file are incompatible with passed pgrid.')
             end if
             deallocate(x)
             deallocate(y)
             deallocate(z)
-            ! N.B. at this point the processors not in this station don't "technically" need to keep going,
-            ! but it's frankly easier to not have to deal with position shenanigans to keep the read head
-            ! properly aligned and the performance hit for this one time thing is not that big.
-
             ! Dimensions of the information to be read... more useful for external reading of the data
             call MPI_FILE_READ_ALL(ifile,dims,3,MPI_INTEGER,status,ierr)
-
+            call MPI_FILE_GET_POSITION(ifile,pos,ierr)
+            ! Close the file now so that only processes within this station open it later
+            call MPI_FILE_CLOSE(ifile,ierr)
             ! Set the index mask for this station
             select case (this%stats(iLoc)%dim)
             case(0) ! 0D
@@ -333,42 +344,15 @@ contains
             end select
             this%stats(iLoc)%msk(:,2) = 1-this%stats(iLoc)%msk(:,1) ! Second column multiplies into ijk
 
-            ! Allocate globVals according to dimension of locator
-            allocate(globVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
-                              sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
-                              sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%nDef))
-            do n=1,this%nDef
-                do k=sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]),sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax])
-                    do j=sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]),sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax])
-                        do i=sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]),sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax])
-                            call MPI_FILE_READ_ALL(ifile,globVals(i,j,k,n),1,MPI_REAL_WP,status,ierr)
-                        end do
-                    end do
-                end do
-            end do
-            if (this%use_bins) then
-                allocate(globVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
-                                    sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
-                                    sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%n_bins,this%nDef_b))
-                do n=1,this%nDef_b
-                    do i_b=1,this%n_bins
-                        do k=sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]),sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax])
-                            do j=sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]),sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax])
-                                do i=sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]),sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax])
-                                    call MPI_FILE_READ_ALL(ifile,globVals_b(i,j,k,i_b,n),1,MPI_REAL_WP,status,ierr)
-                                end do
-                            end do
-                        end do
-                    end do
-                end do
+            ! Create communicator for all the processors in this station
 
-            end if
+            
             ! Figure out if we're even in this station
             if (.not.((this%cfg%imin_.gt.this%stats(iLoc)%imax).or.(this%cfg%imax_.lt.this%stats(iLoc)%imin).or. &
                 (this%cfg%jmin_.gt.this%stats(iLoc)%jmax).or.(this%cfg%jmax_.lt.this%stats(iLoc)%jmin).or. &
                 (this%cfg%kmin_.gt.this%stats(iLoc)%kmax).or.(this%cfg%kmax_.lt.this%stats(iLoc)%kmin))) then
-                
-                this%stats(iLoc)%amIn = .true.
+
+                    this%stats(iLoc)%amIn = .true.
                 ! Set the local array indices
                 ! X
                 if (this%cfg%imin_.gt.this%stats(iLoc)%imin) then
@@ -403,56 +387,6 @@ contains
                 else
                     this%stats(iLoc)%kmax_ = this%stats(iLoc)%kmax
                 end if
-                ! Allocate local values array
-                allocate(this%stats(iLoc)%vals( &
-                sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
-                sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
-                sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),this%nDef))
-                ! Correct for differences in local vs global station size
-                corr =  sum([(this%cfg%x(this%stats(iLoc)%imax_+1)-this%cfg%x(this%stats(iLoc)%imin_)),this%cfg%x(this%stats(iLoc)%imax+1)-this%cfg%x(this%stats(iLoc)%imin)]*real(this%stats(iLoc)%msk(1,:),WP))/ &
-                             (this%cfg%x(this%stats(iLoc)%imax +1)-this%cfg%x(this%stats(iLoc)%imin))                      * &
-                        sum([(this%cfg%y(this%stats(iLoc)%jmax_+1)-this%cfg%y(this%stats(iLoc)%jmin_)),this%cfg%y(this%stats(iLoc)%jmax+1)-this%cfg%y(this%stats(iLoc)%jmin)]*real(this%stats(iLoc)%msk(2,:),WP))/ &
-                             (this%cfg%y(this%stats(iLoc)%jmax +1)-this%cfg%y(this%stats(iLoc)%jmin))                      * &
-                        sum([(this%cfg%z(this%stats(iLoc)%kmax_+1)-this%cfg%z(this%stats(iLoc)%kmin_)),this%cfg%z(this%stats(iLoc)%kmax+1)-this%cfg%z(this%stats(iLoc)%kmin)]*real(this%stats(iLoc)%msk(3,:),WP))/ &
-                             (this%cfg%z(this%stats(iLoc)%kmax +1)-this%cfg%z(this%stats(iLoc)%kmin))
-
-                ! Assign values to that array, un-normalizing them
-                if (this%iNum.ne.-1) then ! Un-normalize the particle number, but only if it actually exists
-                    globVals(:,:,:,this%iNum) = globVals(:,:,:,this%iNum)*this%sum_time*corr
-                end if
-                
-                do i=1,this%nDef
-                    if (sum(abs(this%def(i)%expP)).eq.0) then 
-                        globVals(:,:,:,i) = globVals(:,:,:,i)*this%sum_time*corr ! Volume differences only apply to pure eulerian statistics
-                    elseif (i.ne.this%iNum) then ! Multiply by (particle number*time) now
-                        globVals(:,:,:,i) = globVals(:,:,:,i)*globVals(:,:,:,this%iNum)
-                    end if
-                end do
-                this%stats(iLoc)%vals = globVals( & 
-                    sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
-                    sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
-                    sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:)
-                
-                ! Deal with bins
-                if (this%use_bins) then
-                    allocate(this%stats(iLoc)%binned_vals( &
-                        sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
-                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
-                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),this%n_bins,this%nDef_b))
-                    if (this%iNum_b.ne.-1) then ! Un-normalize the particle number, but only if it actually exists
-                        globVals_b(:,:,:,:,this%iNum_b) = globVals_b(:,:,:,:,this%iNum_b)*this%sum_time*corr
-                    end if
-                    do i_b=1,this%nDef_b ! index in binned_vals
-                        if (i_b.ne.this%iNum_b) then ! Multiply by (particle number*time) now
-                            globVals_b(:,:,:,:,i_b) = globVals_b(:,:,:,:,i_b)*globVals_b(:,:,:,:,this%iNum_b)
-                        end if
-                    end do
-                    ! Send to the local arrays
-                    this%stats(iLoc)%binned_vals = globVals_b( & 
-                        sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
-                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
-                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:,:)
-                end if
                 
                 key = this%cfg%rank
                 color = 0
@@ -463,21 +397,189 @@ contains
                 color = MPI_UNDEFINED
             end if            
             ! Make new communicator for this station
-            call MPI_Comm_split(this%cfg%comm,color,key,this%stats(iLoc)%comm)
+            call MPI_Comm_split(this%cfg%comm,color,key,this%stats(iLoc)%all_comm)
             ! Get new rank and group
             this%stats(iLoc)%amRoot = .false.
             myRank = -1
             if (this%stats(iLoc)%amIn) then
-                call MPI_Comm_rank(this%stats(iLoc)%comm,myRank,ierr)
+                call MPI_Comm_rank(this%stats(iLoc)%all_comm,myRank,ierr)
                 if (myRank.eq.0) this%stats(iLoc)%amRoot = .true.
             end if
 
-            deallocate(globVals)
-            if (allocated(globVals_b)) deallocate(globVals_b)
-        end do
+            !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            !!!!!!!!!!!!!!!!!!!!!!!! Setup for processors in this station !!!!!!!!!!!!!!!!!!!!!!!!!!!
+            !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-        ! Can't be leaving this open
-        call MPI_FILE_CLOSE(ifile,ierr)
+            ! From now on only processors in this station need to do things
+            if (this%stats(iLoc)%amIn) then
+                ! Create communicators and views for summing and writing here
+                select case (this%stats(iLoc)%dim)
+                case(0) ! 0D
+                    ! Need:
+                    !   - all processes sum with each other---need 1 sum_comm
+                    !   - only the station-global root process writes
+                    key = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%jproc-1+this%cfg%npy*(this%cfg%kproc-1))
+                    color = 1
+                case(1) ! X
+                    ! Need:
+                    !   - processes aligned in y and z sum with each other---need npx independent sum_comm
+                    !   - root process in y and z (i.e. the one in the negative y - negative z corner) writes
+                    key = (this%cfg%jproc-1)+this%cfg%npy*(this%cfg%kproc-1)
+                    color = this%cfg%iproc-1
+                case(2) ! Y
+                    ! Need:
+                    !   - processes aligned in x and z sum with each other---need npy independent sum_comm
+                    !   - root process in x and z (i.e. the one in the negative x - negative z corner) writes
+                    key = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%kproc-1)
+                    color = this%cfg%jproc-1
+
+                case(3) ! Z
+                    ! Need:
+                    !   - processes aligned in x and y sum with each other---need npz independent sum_comm
+                    !   - root process in x and y (i.e. the one in the negative x - negative y corner) writes
+                    key = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%jproc-1)
+                    color = this%cfg%kproc-1
+
+                case(4) ! XY
+                    ! Need:
+                    !   - processes aligned in z sum with each other---need npx*npy independent sum_comm
+                    !   - root process in z for each sum_comm writes
+                    key = this%cfg%kproc-1
+                    color = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%jproc-1)
+
+                case(5) ! YZ
+                    ! Need:
+                    !   - processes aligned in x sum with each other---need npy*npz independent sum_comm
+                    !   - root process in x for each sum_comm writes
+                    key   = this%cfg%iproc-1
+                    color = this%cfg%jproc-1+this%cfg%npy*(this%cfg%kproc-1)
+
+                case(6) ! ZX
+                    ! Need:
+                    !   - processes aligned in y sum with each other---need npx*npz independent sum_comm
+                    !   - root process in y for each sum_comm writes
+                    key = this%cfg%jproc-1
+                    color = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%kproc-1)
+
+                case(7) ! XYZ
+                    ! Need:
+                    !   - Everyone gets their own sum_comm :)
+                    !   - Everyone gets to write :)
+                    key = 1
+                    color = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%jproc-1+this%cfg%npy*(this%cfg%kproc-1))
+                end select
+                ! Create the summing communicator
+                call MPI_Comm_split(this%stats(iLoc)%all_comm,color,key,this%stats(iLoc)%sum_comm)
+
+                ! The root process of each summing communicator needs to write---create a communicator amongst those roots
+                call MPI_Comm_rank(this%stats(iLoc)%sum_comm,my_sum_rank,ierr)
+                if (my_sum_rank.eq.0) then
+                    this%stats(iLoc)%should_write = .true.
+                    key = 0
+                    color = 1
+                else
+                    key = 0
+                    color = MPI_UNDEFINED
+                end if
+
+                ! Create communicator for writing (the root of each summing group writes)
+                call MPI_Comm_split(this%stats(iLoc)%all_comm,color,key,this%stats(iLoc)%write_comm)
+
+                ! Create view to link local and station-global coordinates
+                gsizes=[sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax-this%stats(iLoc)%imin+1]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax-this%stats(iLoc)%jmin+1]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax-this%stats(iLoc)%kmin+1])]
+
+                lsizes=[sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_-this%stats(iLoc)%imin_+1]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_-this%stats(iLoc)%jmin_+1]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_-this%stats(iLoc)%kmin_+1])]
+
+                lstart=[sum(this%stats(iLoc)%msk(1,:)*[0,this%stats(iLoc)%imin_-this%stats(iLoc)%imin]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[0,this%stats(iLoc)%jmin_-this%stats(iLoc)%jmin]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[0,this%stats(iLoc)%kmin_-this%stats(iLoc)%kmin])]
+                call MPI_TYPE_CREATE_SUBARRAY(3,gsizes,lsizes,lstart,MPI_ORDER_FORTRAN,MPI_REAL_WP,this%stats(iLoc)%view,ierr)
+                call MPI_TYPE_COMMIT(this%stats(iLoc)%view,ierr)
+
+                ! Allocate vals according to dimension of locator
+                allocate(this%stats(iLoc)%vals( &
+                    sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                    sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                    sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),this%nDef))
+
+                nx_ = size(this%stats(iLoc)%vals,1)
+                ny_ = size(this%stats(iLoc)%vals,2)
+                nz_ = size(this%stats(iLoc)%vals,3)
+
+                ! Reopen our file with the station's communicator:
+                call MPI_FILE_OPEN(this%stats(iLoc)%all_comm,trim(filename),MPI_MODE_RDONLY,info_mpiio,ifile,ierr)
+                
+                ! Read the non-binned stats data
+                do n=1,this%nDef
+                    call MPI_FILE_SET_VIEW(ifile,pos,MPI_REAL_WP,this%stats(iLoc)%view,'native',info_mpiio,ierr)
+                    call MPI_FILE_READ_ALL(ifile,this%stats(iLoc)%vals(:,:,:,n),nx_*ny_*nz_,MPI_REAL_WP,status,ierr)
+                    pos=pos+int(dims(1),MPI_OFFSET_KIND)*int(dims(2),MPI_OFFSET_KIND)*int(dims(3),MPI_OFFSET_KIND)*int(WP,MPI_OFFSET_KIND)
+                end do
+
+                ! Read the binned data
+                if (this%use_bins) then
+                    allocate(this%stats(iLoc)%binned_vals( &
+                        sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),this%n_bins,this%nDef_b))
+                    do n=1,this%nDef_b
+                        do i_b=1,this%n_bins
+                            call MPI_FILE_SET_VIEW(ifile,pos,MPI_REAL_WP,this%stats(iLoc)%view,'native',info_mpiio,ierr)
+                            call MPI_FILE_READ_ALL(ifile,this%stats(iLoc)%binned_vals(:,:,:,i_b,n),nx_*ny_*nz_,MPI_REAL_WP,status,ierr)
+                            pos=pos+int(dims(1),MPI_OFFSET_KIND)*int(dims(2),MPI_OFFSET_KIND)*int(dims(3),MPI_OFFSET_KIND)*int(WP,MPI_OFFSET_KIND)
+                        end do
+                    end do
+
+                end if
+
+                ! Correct for differences in local vs global station size
+                corr =  sum([(this%cfg%x(this%stats(iLoc)%imax_+1)-this%cfg%x(this%stats(iLoc)%imin_)),this%cfg%x(this%stats(iLoc)%imax+1)-this%cfg%x(this%stats(iLoc)%imin)]*real(this%stats(iLoc)%msk(1,:),WP))/ &
+                            (this%cfg%x(this%stats(iLoc)%imax +1)-this%cfg%x(this%stats(iLoc)%imin))                      * &
+                        sum([(this%cfg%y(this%stats(iLoc)%jmax_+1)-this%cfg%y(this%stats(iLoc)%jmin_)),this%cfg%y(this%stats(iLoc)%jmax+1)-this%cfg%y(this%stats(iLoc)%jmin)]*real(this%stats(iLoc)%msk(2,:),WP))/ &
+                            (this%cfg%y(this%stats(iLoc)%jmax +1)-this%cfg%y(this%stats(iLoc)%jmin))                      * &
+                        sum([(this%cfg%z(this%stats(iLoc)%kmax_+1)-this%cfg%z(this%stats(iLoc)%kmin_)),this%cfg%z(this%stats(iLoc)%kmax+1)-this%cfg%z(this%stats(iLoc)%kmin)]*real(this%stats(iLoc)%msk(3,:),WP))/ &
+                            (this%cfg%z(this%stats(iLoc)%kmax +1)-this%cfg%z(this%stats(iLoc)%kmin))
+
+                ! Un-normalize the locally-stored statistics array, correcting for volume and integration time
+                if (this%iNum.ne.-1) then ! Un-normalize the particle number, but only if it actually exists
+                    ! We also multiply by corr such that when re-summing later we get back to the original reduced value,
+                    !   avoiding a situation in which samples prior to a restart are weighted higher than those after a restart
+                    this%stats(iLoc)%vals(:,:,:,this%iNum) = this%stats(iLoc)%vals(:,:,:,this%iNum)*this%sum_time*corr
+                end if
+                ! Deal with everything that isn't particle number
+                do i=1,this%nDef
+                    if (sum(abs(this%def(i)%expP)).eq.0) then ! Eulerian stats are un-normalized by sum_time
+                        this%stats(iLoc)%vals(:,:,:,i) = this%stats(iLoc)%vals(:,:,:,i)*this%sum_time*corr
+                    elseif (i.ne.this%iNum) then ! Multiply by (particle number*time) now
+                        this%stats(iLoc)%vals(:,:,:,i) = this%stats(iLoc)%vals(:,:,:,i)*this%stats(iLoc)%vals(:,:,:,this%iNum)
+                    end if
+                end do
+
+                ! Deal with bins
+                if (this%use_bins) then
+                    if (this%iNum_b.ne.-1) then ! Un-normalize the particle number, but only if it actually exists
+                        this%stats(iLoc)%binned_vals(:,:,:,:,this%iNum_b) = this%stats(iLoc)%binned_vals(:,:,:,:,this%iNum_b)*this%sum_time*corr
+                    end if
+                    do i_b=1,this%nDef_b ! index in binned_vals
+                        if (i_b.ne.this%iNum_b) then ! Multiply by (particle number*time) now
+                            this%stats(iLoc)%binned_vals(:,:,:,:,i_b) = this%stats(iLoc)%binned_vals(:,:,:,:,i_b)*this%stats(iLoc)%binned_vals(:,:,:,:,this%iNum_b)
+                        end if
+                    end do
+                end if
+                call MPI_FILE_CLOSE(ifile,ierr)
+            else ! If this processor isn't in the station, need to advance the readhead to catch up
+                ! Account for non-binned data:
+                pos=pos+int(dims(1),MPI_OFFSET_KIND)*int(dims(2),MPI_OFFSET_KIND)*int(dims(3),MPI_OFFSET_KIND)*&
+                        int(this%nDef,MPI_OFFSET_KIND)*int(WP,MPI_OFFSET_KIND)
+                ! Account for binned data (0 if no bins):
+                pos=pos+int(dims(1),MPI_OFFSET_KIND)*int(dims(2),MPI_OFFSET_KIND)*int(dims(3),MPI_OFFSET_KIND)*&
+                        int(this%nDef_b,MPI_OFFSET_KIND)*int(this%n_bins,MPI_OFFSET_KIND)*int(WP,MPI_OFFSET_KIND)
+            end if
+        end do        
 
     end subroutine restart_from_file
 
@@ -561,7 +663,12 @@ contains
             case ('xyz','xzy','yxz','yzx','zxy','zyx','3d')
                 this%stats(iLoc)%dim=7
                 this%stats(iLoc)%msk(:,1) = [0,0,0]
-            case default; call die('[stats add_station] Unrecognized dimension of station.')
+            case default
+                unrec_stat_dim : block
+                    character(len=100) :: my_message
+                    my_message = '[stats add_station] Unrecognized dimension of station '//trim(name)
+                    call die(my_message)
+                end block unrec_stat_dim
             end select
             this%stats(iLoc)%msk(:,2) = 1-this%stats(iLoc)%msk(:,1)
             ! Loop over mesh to find local bounding indices for the station
@@ -607,11 +714,10 @@ contains
                 end if
             end block check_in_domain
             
+            create_all_comm : block
             ! Figure out our group and communicator
             call MPI_GROUP_SIZE(this%cfg%group,nproc,ierr)
-
             call MPI_Group_rank(this%cfg%group,myRank,ierr)
-
             do i=0,nproc-1
                 if (myRank.eq.i) then
                     if (this%stats(iLoc)%amIn) then
@@ -623,14 +729,108 @@ contains
                     end if
                 end if
             end do
-            call MPI_Comm_split(this%cfg%comm,color,key,this%stats(iLoc)%comm)
+            call MPI_Comm_split(this%cfg%comm,color,key,this%stats(iLoc)%all_comm)
             ! Get new rank and group
             this%stats(iLoc)%amRoot = .false.
             myRank = -1
             if (this%stats(iLoc)%amIn) then
-                call MPI_Comm_rank(this%stats(iLoc)%comm,myRank,ierr)
+                call MPI_Comm_rank(this%stats(iLoc)%all_comm,myRank,ierr)
                 if (myRank.eq.0) this%stats(iLoc)%amRoot = .true.
             end if
+            end block create_all_comm
+
+            create_sum_write_comms : block
+            integer :: my_sum_rank
+            integer, dimension(3) :: gsizes,lsizes,lstart
+            if (this%stats(iLoc)%amIn) then
+                ! Pick the key and color for the sum communicator based on a select case:
+                select case (this%stats(iLoc)%dim)
+                case(0) ! 0D
+                    ! Need:
+                    !   - all processes sum with each other---need 1 sum_comm
+                    !   - only the station-global root process writes
+                    key = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%jproc-1+this%cfg%npy*(this%cfg%kproc-1))
+                    color = 1
+                case(1) ! X
+                    ! Need:
+                    !   - processes aligned in y and z sum with each other---need npx independent sum_comm
+                    !   - root process in y and z (i.e. the one in the negative y - negative z corner) writes
+                    key = (this%cfg%jproc-1)+this%cfg%npy*(this%cfg%kproc-1)
+                    color = this%cfg%iproc-1
+                case(2) ! Y
+                    ! Need:
+                    !   - processes aligned in x and z sum with each other---need npy independent sum_comm
+                    !   - root process in x and z (i.e. the one in the negative x - negative z corner) writes
+                    key = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%kproc-1)
+                    color = this%cfg%jproc-1
+
+                case(3) ! Z
+                    ! Need:
+                    !   - processes aligned in x and y sum with each other---need npz independent sum_comm
+                    !   - root process in x and y (i.e. the one in the negative x - negative y corner) writes
+                    key = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%jproc-1)
+                    color = this%cfg%kproc-1
+
+                case(4) ! XY
+                    ! Need:
+                    !   - processes aligned in z sum with each other---need npx*npy independent sum_comm
+                    !   - root process in z for each sum_comm writes
+                    key = this%cfg%kproc-1
+                    color = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%jproc-1)
+
+                case(5) ! YZ
+                    ! Need:
+                    !   - processes aligned in x sum with each other---need npy*npz independent sum_comm
+                    !   - root process in x for each sum_comm writes
+                    key   = this%cfg%iproc-1
+                    color = this%cfg%jproc-1+this%cfg%npy*(this%cfg%kproc-1)
+
+                case(6) ! ZX
+                    ! Need:
+                    !   - processes aligned in y sum with each other---need npx*npz independent sum_comm
+                    !   - root process in y for each sum_comm writes
+                    key = this%cfg%jproc-1
+                    color = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%kproc-1)
+
+                case(7) ! XYZ
+                    ! Need:
+                    !   - Everyone gets their own sum_comm :)
+                    !   - Everyone gets to write :)
+                    key = 1
+                    color = (this%cfg%iproc-1)+this%cfg%npx*(this%cfg%jproc-1+this%cfg%npy*(this%cfg%kproc-1))
+                end select
+
+                call MPI_Comm_split(this%stats(iLoc)%all_comm,color,key,this%stats(iLoc)%sum_comm)
+
+                ! The root process of each summing communicator needs to write---create a communicator amongst those roots
+                call MPI_Comm_rank(this%stats(iLoc)%sum_comm,my_sum_rank,ierr)
+                if (my_sum_rank.eq.0) then
+                    this%stats(iLoc)%should_write = .true.
+                    key = 0
+                    color = 1
+                else
+                    key = 0
+                    color = MPI_UNDEFINED
+                end if
+                ! Create communicator for writing (the root of each summing group writes)
+                call MPI_Comm_split(this%stats(iLoc)%all_comm,color,key,this%stats(iLoc)%write_comm)
+
+                ! Create view to link local and station-global coordinates
+                gsizes=[sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax-this%stats(iLoc)%imin+1]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax-this%stats(iLoc)%jmin+1]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax-this%stats(iLoc)%kmin+1])]
+
+                lsizes=[sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_-this%stats(iLoc)%imin_+1]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_-this%stats(iLoc)%jmin_+1]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_-this%stats(iLoc)%kmin_+1])]
+
+                lstart=[sum(this%stats(iLoc)%msk(1,:)*[0,this%stats(iLoc)%imin_-this%stats(iLoc)%imin]),&
+                        sum(this%stats(iLoc)%msk(2,:)*[0,this%stats(iLoc)%jmin_-this%stats(iLoc)%jmin]),&
+                        sum(this%stats(iLoc)%msk(3,:)*[0,this%stats(iLoc)%kmin_-this%stats(iLoc)%kmin])]
+                call MPI_TYPE_CREATE_SUBARRAY(3,gsizes,lsizes,lstart,MPI_ORDER_FORTRAN,MPI_REAL_WP,this%stats(iLoc)%view,ierr)
+                call MPI_TYPE_COMMIT(this%stats(iLoc)%view,ierr)
+            end if
+            end block create_sum_write_comms
         end if
             
     end subroutine add_station
@@ -838,7 +1038,6 @@ contains
         class(stats_parent),intent(inout) :: this
         real(WP), intent(in) :: dt
         integer :: i,j,k,iDef,iLoc,iS,jS,kS,iA,ierr,iDef_b
-        real(WP) :: isP
         real(WP) :: corr ! Corrects for sampling volume when stat cell is larger than mesh cell
         integer, dimension(3,2) :: msk ! Modify indices for different station dimensions
         real(WP), dimension(:,:,:), allocatable:: buf,buf2 ! Buffer for building stats
@@ -857,8 +1056,6 @@ contains
                 do iDef=1,this%nDef
                     buf = 1.0_WP
                     if (this%def(iDef)%nTA.gt.0) then
-                        isP = 0
-                        if (sum(abs(this%def(iDef)%expP)).ne.0) isP = 1.0_WP ! Are we collecting particle statistics?
                         ! Use buf2 to gather across p-mesh of this station, then dump into buffer with size of stats(iLoc)%vals
                         allocate(buf2(this%stats(iLoc)%imin_:this%stats(iLoc)%imax_,this%stats(iLoc)%jmin_:this%stats(iLoc)%jmax_,this%stats(iLoc)%kmin_:this%stats(iLoc)%kmax_))
 
@@ -917,7 +1114,7 @@ contains
                             i = size(buf,1)*size(buf,2)*size(buf,3)
                             ! Combine across partitions if includes eulerian info; otherwise buf remains = 1.0_WP
                             ! Weighted averaging with corr is done now.
-                            call MPI_ALLREDUCE(buf,buf2,i,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%comm,ierr); buf=buf2
+                            call MPI_ALLREDUCE(buf,buf2,i,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%all_comm,ierr); buf=buf2
                             deallocate(buf2)
                         end if
                         do i=1,this%lp%np_
@@ -966,8 +1163,8 @@ contains
         use parallel, only: MPI_REAL_WP
         class(stats_parent), intent(inout) :: this
         integer :: n,i,i_b,iLoc,ierr,numVals
-        real(WP), dimension(:,:,:,:), allocatable :: buf,globVals
-        real(WP), dimension(:,:,:,:,:), allocatable :: buf_b,globVals_b ! Binned versions
+        real(WP), dimension(:,:,:,:), allocatable :: buf,reduceVals
+        real(WP), dimension(:,:,:,:,:), allocatable :: buf_b,reduceVals_b ! Binned versions
 
         do iLoc=1,this%nLoc
             if (this%stats(iLoc)%amIn) then
@@ -975,167 +1172,169 @@ contains
                 allocate(buf(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
                              sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
                              sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%nDef))
-                allocate(globVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
+                allocate(reduceVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
                                   sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
                                   sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%nDef))
-                globVals = 0.0_WP
-                globVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                reduceVals = 0.0_WP
+                reduceVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
                          sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
                          sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:) = this%stats(iLoc)%vals
                 ! Sum over all partitions within the station
-                numVals = size(globVals,1)*size(globVals,2)*size(globVals,3)*size(globVals,4)
-                call MPI_ALLREDUCE(globVals,buf,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%comm,ierr); globVals = buf
+                numVals = size(reduceVals,1)*size(reduceVals,2)*size(reduceVals,3)*size(reduceVals,4)
+                call MPI_ALLREDUCE(reduceVals,buf,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%all_comm,ierr); reduceVals = buf
                 deallocate(buf)
 
                 do i = 1,this%nDef
                     ! If no particles, this is simple
                     if (sum(abs(this%def(i)%expP)).eq.0) then
-                        globVals(:,:,:,i) = globVals(:,:,:,i)/this%sum_time
+                        reduceVals(:,:,:,i) = reduceVals(:,:,:,i)/this%sum_time
                     elseif (i.ne.this%iNum) then ! Don't divide out particle number yet... that'd mess everything else up
                         ! If there are particles, need to be careful to not divide by zero
-                        where (globVals(:,:,:,this%iNum).gt.0.0_WP) ! Only normalize where we found particles
-                            globVals(:,:,:,i) = globVals(:,:,:,i)/globVals(:,:,:,this%iNum)
+                        where (reduceVals(:,:,:,this%iNum).gt.0.0_WP) ! Only normalize where we found particles
+                            reduceVals(:,:,:,i) = reduceVals(:,:,:,i)/reduceVals(:,:,:,this%iNum)
                         elsewhere
-                            globVals(:,:,:,i) = 0.0_WP
+                            reduceVals(:,:,:,i) = 0.0_WP
                         end where
                     end if
                 end do
                 if (this%iNum.ne.-1) then ! Normalize the particle number, but only if it actually exists
-                    globVals(:,:,:,this%iNum) = globVals(:,:,:,this%iNum)/this%sum_time
+                    reduceVals(:,:,:,this%iNum) = reduceVals(:,:,:,this%iNum)/this%sum_time
                 end if
                 ! Send global values back to the vals array
-                this%stats(iLoc)%vals = globVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                this%stats(iLoc)%vals = reduceVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
                                                  sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
                                                  sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:)
-                deallocate(globVals)
+                deallocate(reduceVals)
                 if (.not.this%use_bins) cycle
                 ! Deal with bins now
                 allocate(buf_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
                                 sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
                                 sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%n_bins,this%nDef))
-                allocate(globVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
+                allocate(reduceVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
                                     sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
                                     sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%n_bins,this%nDef_b))
-                globVals_b = 0.0_WP
-                globVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                reduceVals_b = 0.0_WP
+                reduceVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
                             sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
                             sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:,:) = this%stats(iLoc)%binned_vals
                 ! Sum over all partitions within the station
-                numVals = size(globVals_b,1)*size(globVals_b,2)*size(globVals_b,3)*size(globVals_b,4)*size(globVals_b,5)
-                call MPI_ALLREDUCE(globVals_b,buf_b,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%comm,ierr); globVals_b = buf_b
+                numVals = size(reduceVals_b,1)*size(reduceVals_b,2)*size(reduceVals_b,3)*size(reduceVals_b,4)*size(reduceVals_b,5)
+                call MPI_ALLREDUCE(reduceVals_b,buf_b,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%all_comm,ierr); reduceVals_b = buf_b
                 deallocate(buf_b)
 
                 do i = 1,this%nDef_b
                     i_b = this%i_b2def(i)
                     if (i_b.ne.this%iNum_b) then ! Don't divide out particle number yet... that'd mess everything else up
                         ! If there are particles, need to be careful to not divide by zero
-                        where (globVals_b(:,:,:,:,this%iNum_b).gt.0.0_WP) ! Only normalize where we found particles
-                            globVals_b(:,:,:,:,i) = globVals_b(:,:,:,:,i)/globVals_b(:,:,:,:,this%iNum_b)
+                        where (reduceVals_b(:,:,:,:,this%iNum_b).gt.0.0_WP) ! Only normalize where we found particles
+                            reduceVals_b(:,:,:,:,i) = reduceVals_b(:,:,:,:,i)/reduceVals_b(:,:,:,:,this%iNum_b)
                         elsewhere
-                            globVals_b(:,:,:,:,i) = 0.0_WP
+                            reduceVals_b(:,:,:,:,i) = 0.0_WP
                         end where
                     end if
                 end do
                 if (this%iNum_b.ne.-1) then ! Normalize the particle number, but only if it actually exists
-                    globVals_b(:,:,:,:,this%iNum_b) = globVals_b(:,:,:,:,this%iNum_b)/this%sum_time
+                    reduceVals_b(:,:,:,:,this%iNum_b) = reduceVals_b(:,:,:,:,this%iNum_b)/this%sum_time
                 end if
                 ! Send global values back to the vals array
                 this%stats(iLoc)%binned_vals = &
-                    globVals_b( sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                    reduceVals_b( sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
                                 sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
                                 sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:,:)
-                deallocate(globVals_b)
+                deallocate(reduceVals_b)
             end if
         end do
     end subroutine post_process
 
-    ! Get global values for a single locator/station
-    subroutine get_global(this,iLoc,globVals,globVals_b)
+    ! Get reduced local values for a single locator/station
+    subroutine get_reduced(this,iLoc,reduceVals,reduceVals_b)
         use mpi_f08,  only: MPI_ALLREDUCE,MPI_SUM
         use parallel, only: MPI_REAL_WP
         class(stats_parent), intent(inout) :: this
         integer :: n,i,ierr,numVals,i_b
         integer, intent(in) :: iLoc
         real(WP), dimension(:,:,:,:), allocatable :: buf
-        real(WP), dimension(:,:,:,:), allocatable, intent(out) :: globVals
+        real(WP), dimension(:,:,:,:), allocatable, intent(out) :: reduceVals
         real(WP), dimension(:,:,:,:,:), allocatable :: buf_b ! Buffer for binned global values
-        real(WP), dimension(:,:,:,:,:), allocatable, optional, intent(out) :: globVals_b ! Binned global values
+        real(WP), dimension(:,:,:,:,:), allocatable, optional, intent(out) :: reduceVals_b ! Binned global values
 
         if (this%stats(iLoc)%amIn) then
             ! Allocate array to hold the global (for station) statistics
-            allocate(buf(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
-                         sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
-                         sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%nDef))
-            allocate(globVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
-                              sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
-                              sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%nDef))
-            globVals = 0.0_WP
-            globVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
-                     sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
-                     sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:) = this%stats(iLoc)%vals
+            allocate(buf(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                         sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                         sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),this%nDef))
+            allocate(reduceVals(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                              sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                              sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),this%nDef))
+            reduceVals = this%stats(iLoc)%vals
             ! Sum over all partitions within the station
-            numVals = size(globVals,1)*size(globVals,2)*size(globVals,3)*size(globVals,4)
-            call MPI_ALLREDUCE(globVals,buf,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%comm,ierr); globVals = buf
+
+            numVals = size(reduceVals,1)*size(reduceVals,2)*size(reduceVals,3)*size(reduceVals,4)
+            call MPI_ALLREDUCE(reduceVals,buf,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%sum_comm,ierr); reduceVals = buf
             deallocate(buf)
             do i = 1,this%nDef
                 ! If no particles, this is simple
                 if (sum(abs(this%def(i)%expP)).eq.0) then
-                    globVals(:,:,:,i) = globVals(:,:,:,i)/this%sum_time
+                    reduceVals(:,:,:,i) = reduceVals(:,:,:,i)/this%sum_time
                 elseif (i.ne.this%iNum) then ! Don't divide out particle number yet... that'd mess everything else up
                     ! If there are particles, need to be careful to not divide by zero
-                    where (globVals(:,:,:,this%iNum).gt.0.0_WP) ! Only normalize where we found particles
-                        globVals(:,:,:,i) = globVals(:,:,:,i)/globVals(:,:,:,this%iNum)
+                    where (reduceVals(:,:,:,this%iNum).gt.0.0_WP) ! Only normalize where we found particles
+                        reduceVals(:,:,:,i) = reduceVals(:,:,:,i)/reduceVals(:,:,:,this%iNum)
                     elsewhere
-                        globVals(:,:,:,i) = 0.0_WP
+                        reduceVals(:,:,:,i) = 0.0_WP
                     end where
                 end if
             end do
             if (this%iNum.ne.-1) then ! Normalize the particle number, but only if it actually exists
-                globVals(:,:,:,this%iNum) = globVals(:,:,:,this%iNum)/this%sum_time
+                reduceVals(:,:,:,this%iNum) = reduceVals(:,:,:,this%iNum)/this%sum_time
             end if
             ! Deal with bins now
             if (.not.this%use_bins) return
-            allocate(buf_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
-                            sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
-                            sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%n_bins,this%nDef_b))
-            allocate(globVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax]),&
-                                sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax]),&
-                                sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax]),this%n_bins,this%nDef_b))
-            globVals_b = 0.0_WP
-            globVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
-                        sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
-                        sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),:,:) = this%stats(iLoc)%binned_vals
-            ! Sum over all partitions within the station
-            numVals = size(globVals_b,1)*size(globVals_b,2)*size(globVals_b,3)*size(globVals_b,4)*size(globVals_b,5)
-            call MPI_ALLREDUCE(globVals_b,buf_b,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%comm,ierr); globVals_b = buf_b
+            allocate(buf_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                            sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                            sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),this%n_bins,this%nDef_b))
+            allocate(reduceVals_b(sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imin_]):sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax_]),&
+                                sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmin_]):sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax_]),&
+                                sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmin_]):sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax_]),this%n_bins,this%nDef_b))
+            reduceVals_b = this%stats(iLoc)%binned_vals
+            ! Sum over all partitions within the station which align in the summing directions
+            numVals = size(reduceVals_b,1)*size(reduceVals_b,2)*size(reduceVals_b,3)*size(reduceVals_b,4)*size(reduceVals_b,5)
+
+            call MPI_ALLREDUCE(reduceVals_b,buf_b,numVals,MPI_REAL_WP,MPI_SUM,this%stats(iLoc)%sum_comm,ierr); reduceVals_b = buf_b
             deallocate(buf_b)
 
             do i = 1,this%nDef_b
                 i_b = this%i_b2def(i)
                 if (i_b.ne.this%iNum_b) then ! Don't divide out particle number yet... that'd mess everything else up
                     ! If there are particles, need to be careful to not divide by zero
-                    where (globVals_b(:,:,:,:,this%iNum_b).gt.0.0_WP) ! Only normalize where we found particles
-                        globVals_b(:,:,:,:,i) = globVals_b(:,:,:,:,i)/globVals_b(:,:,:,:,this%iNum_b)
+                    where (reduceVals_b(:,:,:,:,this%iNum_b).gt.0.0_WP) ! Only normalize where we found particles
+                        reduceVals_b(:,:,:,:,i) = reduceVals_b(:,:,:,:,i)/reduceVals_b(:,:,:,:,this%iNum_b)
                     elsewhere
-                        globVals_b(:,:,:,:,i) = 0.0_WP
+                        reduceVals_b(:,:,:,:,i) = 0.0_WP
                     end where
                 end if
             end do
             if (this%iNum_b.ne.-1) then ! Normalize the particle number, but only if it actually exists
-                globVals_b(:,:,:,:,this%iNum_b) = globVals_b(:,:,:,:,this%iNum_b)/this%sum_time
+                reduceVals_b(:,:,:,:,this%iNum_b) = reduceVals_b(:,:,:,:,this%iNum_b)/this%sum_time
             end if
         end if
-    end subroutine get_global
+    end subroutine get_reduced
+    
     ! Store current state of statistics to the disk for retrieval later. Doesn't affect current arrays
     subroutine write(this,fdata)
         use messager, only: die
+        use parallel, only: MPI_REAL_WP,info_mpiio
+        use mpi_f08
         implicit none
         class(stats_parent), intent(inout) :: this
         character(len=*), intent(in), optional :: fdata
         character(len=str_medium) :: filename
         integer :: i,j,k,iLoc,n,ierr,iunit,i_b
-        real(WP), dimension(:,:,:,:), allocatable :: globVals
-        real(WP), dimension(:,:,:,:,:), allocatable :: globVals_b
+        integer(kind=MPI_OFFSET_KIND) :: pos
+        type(MPI_File) :: ifile
+        type(MPI_Status):: status
+        real(WP), dimension(:,:,:,:), allocatable :: reduceVals
+        real(WP), dimension(:,:,:,:,:), allocatable :: reduceVals_b
         character(len=8) :: dateChar
         character(len=10) :: timeChar
 
@@ -1209,16 +1408,16 @@ contains
 
         ! Loop over stations
         do iLoc=1,this%nLoc
-            ! Stop the non-root processors from stepping on the processor currently writing data
+            ! Stop the processors in a later station but not the current one from stepping on the processors in the current station
             call MPI_Barrier(this%cfg%comm)
 
             ! Only do stuff if we're in this station
             if (this%stats(iLoc)%amIn) then
                 ! Gather together global data---every process does this
                 if (this%use_bins) then
-                    call this%get_global(iLoc=iLoc,globVals=globVals,globVals_b=globVals_b)
+                    call this%get_reduced(iLoc=iLoc,reduceVals=reduceVals,reduceVals_b=reduceVals_b)
                 else
-                    call this%get_global(iLoc=iLoc,globVals=globVals)
+                    call this%get_reduced(iLoc=iLoc,reduceVals=reduceVals)
                 end if
                 ! If we are the station root, write station info
                 if (this%stats(iLoc)%amRoot) then
@@ -1246,37 +1445,44 @@ contains
                         write(iunit) this%cfg%z(k)
                     end do
                     ! Write sizes of upcoming data... not strictly necessary given above knowledge of dimension and whatnot but makes life easier later (mostly for post-processing)
-                    write(iunit) size(globVals,1) ! X
-                    write(iunit) size(globVals,2) ! Y
-                    write(iunit) size(globVals,3) ! Z
+                    write(iunit) sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax-this%stats(iLoc)%imin+1]) ! X
+                    write(iunit) sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax-this%stats(iLoc)%jmin+1]) ! Y
+                    write(iunit) sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax-this%stats(iLoc)%kmin+1]) ! Z
+                    close(iunit)
+                end if
 
-                    ! Write global data
+                ! All the processes which should be writing write now:
+                if (this%stats(iLoc)%should_write) then
+                    write_parallel : block
+                    integer :: nx_,ny_,nz_,nx,ny,nz ! These are for the sizes of the arrays, NOT the stations coordinates!
+                    nx_ = size(reduceVals,1)
+                    ny_ = size(reduceVals,2)
+                    nz_ = size(reduceVals,3)
+                    nx  = sum(this%stats(iLoc)%msk(1,:)*[1,this%stats(iLoc)%imax-this%stats(iLoc)%imin+1])
+                    ny  = sum(this%stats(iLoc)%msk(2,:)*[1,this%stats(iLoc)%jmax-this%stats(iLoc)%jmin+1])
+                    nz  = sum(this%stats(iLoc)%msk(3,:)*[1,this%stats(iLoc)%kmax-this%stats(iLoc)%kmin+1])
+                    call MPI_FILE_OPEN(this%stats(iLoc)%write_comm,trim(filename),IOR(MPI_MODE_WRONLY,MPI_MODE_APPEND),info_mpiio,ifile,ierr)
+                    call MPI_FILE_GET_POSITION(ifile,pos,ierr)
+
                     do n=1,this%nDef
-                        do k=1,size(globVals,3)
-                            do j=1,size(globVals,2)
-                                do i=1,size(globVals,1)
-                                    write(iunit) globVals(i,j,k,n)
-                                end do
-                            end do
-                        end do
+                        call MPI_FILE_SET_VIEW(ifile,pos,MPI_REAL_WP,this%stats(iLoc)%view,'native',info_mpiio,ierr)
+                        call MPI_FILE_WRITE_ALL(ifile,reduceVals(:,:,:,n),nx_*ny_*nz_,MPI_REAL_WP,status,ierr)
+                        pos=pos+int(nx,MPI_OFFSET_KIND)*int(ny,MPI_OFFSET_KIND)*int(nz,MPI_OFFSET_KIND)*int(WP,MPI_OFFSET_KIND)                                    
                     end do
+
                     ! Write binned global data (if needed)
                     do n=1,this%nDef_b ! this loop never runs if there are no bins
                         do i_b=1,this%n_bins
-                            do k=1,size(globVals,3)
-                                do j=1,size(globVals,2)
-                                    do i=1,size(globVals,1)
-                                        write(iunit) globVals_b(i,j,k,i_b,n)
-                                    end do
-                                end do
-                            end do
+                            call MPI_FILE_SET_VIEW(ifile,pos,MPI_REAL_WP,this%stats(iLoc)%view,'native',info_mpiio,ierr)
+                            call MPI_FILE_WRITE_ALL(ifile,reduceVals_b(:,:,:,i_b,n),nx_*ny_*nz_,MPI_REAL_WP,status,ierr)
+                            pos=pos+int(nx,MPI_OFFSET_KIND)*int(ny,MPI_OFFSET_KIND)*int(nz,MPI_OFFSET_KIND)*int(WP,MPI_OFFSET_KIND)                                    
                         end do
                     end do
-                    close(iunit)
+                    call MPI_FILE_CLOSE(ifile,ierr)
+                    end block write_parallel
                 end if
-                
-                ! Deallocate globVals
-                deallocate(globVals)
+                ! Deallocate reduceVals
+                deallocate(reduceVals)
             end if
         end do
     end subroutine write
